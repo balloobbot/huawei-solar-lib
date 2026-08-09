@@ -1,5 +1,7 @@
 """Huawei EMMA (SmartHEMS) device support."""
 
+from __future__ import annotations
+
 from huawei_solar import register_names as rn
 
 from .base import HuaweiSolarDevice
@@ -23,16 +25,8 @@ class EMMADevice(HuaweiSolarDevice):
         return True
 
     async def _populate_additional_fields(self) -> None:
-        (
-            serial_number_result,
-            software_version_result,
-        ) = await self.client.get_multiple(
-            [
-                rn.SERIAL_NUMBER,
-                rn.SOFTWARE_VERSION,
-            ],
-        )
-        self.serial_number = serial_number_result.value
-        self.software_version = software_version_result.value
+        identity = await self.get_multiple([rn.SERIAL_NUMBER, rn.SOFTWARE_VERSION])
+        self.serial_number = identity[rn.SERIAL_NUMBER]
+        self.software_version = identity[rn.SOFTWARE_VERSION]
 
-        self.model_name = (await self.get(rn.EMMA_MODEL)).value
+        self.model_name = await self.get(rn.EMMA_MODEL)

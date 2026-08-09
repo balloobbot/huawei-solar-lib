@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from huawei_solar.exceptions import DecodeError
-from huawei_solar.register_definitions.string import bytes_to_string
+from huawei_solar.fields import bytes_to_string
 from huawei_solar.register_values import _IntEnumWithPrettyString
 from huawei_solar.utils import get_local_timezone
 

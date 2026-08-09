@@ -1,5 +1,7 @@
 """Huawei SDongle device support."""
 
+from __future__ import annotations
+
 from huawei_solar import register_names as rn
 
 from .base import HuaweiSolarDevice
@@ -14,14 +16,6 @@ class SDongleDevice(HuaweiSolarDevice):
         return model_name.startswith("SDongle")
 
     async def _populate_additional_fields(self) -> None:
-        (
-            model_name_result,
-            serial_number_result,
-        ) = await self.client.get_multiple(
-            [
-                rn.MODEL_NAME,
-                rn.SERIAL_NUMBER,
-            ],
-        )
-        self.model_name = model_name_result.value
-        self.serial_number = serial_number_result.value
+        identity = await self.get_multiple([rn.MODEL_NAME, rn.SERIAL_NUMBER])
+        self.model_name = identity[rn.MODEL_NAME]
+        self.serial_number = identity[rn.SERIAL_NUMBER]

@@ -1,5 +1,7 @@
 """Huawei SmartLogger device support."""
 
+from __future__ import annotations
+
 from huawei_solar import register_names as rn
 
 from .base import HuaweiSolarDevice
@@ -16,6 +18,5 @@ class SmartLoggerDevice(HuaweiSolarDevice):
         return model_name.startswith("SmartLogger")
 
     async def _populate_additional_fields(self) -> None:
-        esn_result = await self.client.get(rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN)
-        self.serial_number = esn_result.value
+        self.serial_number = await self.get(rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN)
         # model_name is already set by create_device_instance() via constructor

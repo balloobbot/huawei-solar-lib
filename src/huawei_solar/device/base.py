@@ -1,70 +1,142 @@
 """Base for classes that represent a single Huawei Solar device."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Self
 
-from huawei_solar import register_names as rn
-from huawei_solar.const import MAX_BATCHED_REGISTERS_COUNT, MAX_BATCHED_REGISTERS_GAP
+from modbus_connection import ModbusExceptionError
+from modbus_connection.model import ComponentGroup
+
+from huawei_solar import session
 from huawei_solar.exceptions import (
     HuaweiSolarException,
     InvalidCredentials,
+    PermissionDeniedError,
     WriteException,
 )
-from huawei_solar.modbus_pdu import PermissionDeniedError
-from huawei_solar.registers import REGISTERS
+from huawei_solar.registry import REGISTER_LOCATIONS
 
 if TYPE_CHECKING:
-    from huawei_solar.modbus_client import AsyncHuaweiSolarClient
-    from huawei_solar.register_definitions import Result
+    from collections.abc import Iterable
+
+    from modbus_connection import ModbusUnit
+
+    from huawei_solar.components.base import HuaweiComponent
+    from huawei_solar.registry import RegisterLocation
 
 _LOGGER = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL = 15
 
+#: Written back with the value it already holds, to find out whether this
+#: connection is allowed to write at all.
+WRITE_TEST_REGISTER = "time_zone"
 
-WRITE_TEST_REGISTER = rn.TIME_ZONE
+
+def _instance_key(location: RegisterLocation) -> tuple[type[HuaweiComponent], int]:
+    """Return the component instance a register lives on: its class and its index."""
+    return (location.component, location.instance or 1)
+
+
+class _Poll:
+    """One shaped read: the components covering a set of registers, pooled.
+
+    A component is narrowed to the fields the caller asked for, so a Home
+    Assistant install with half its entities disabled does not read the other
+    half. ``restrict_fields`` only ever narrows, so a changed set of registers
+    builds fresh components rather than widening these.
+    """
+
+    def __init__(self, unit: ModbusUnit, names: Iterable[str]) -> None:
+        """Build the components covering ``names`` and pool them into one group."""
+        self.names = list(names)
+        wanted: dict[tuple[type[HuaweiComponent], int], set[str]] = {}
+        for name in self.names:
+            location = REGISTER_LOCATIONS[name]
+            wanted.setdefault(_instance_key(location), set()).add(location.field)
+
+        self._components: dict[tuple[type[HuaweiComponent], int], HuaweiComponent] = {}
+        for (component_class, index), fields in wanted.items():
+            component = component_class(unit, index)
+            component.restrict_fields(fields)
+            # restrict_fields narrows the component's readable ranges by
+            # *address*, to keep a device's declared map honest. Huawei names
+            # three registers twice — 32066 is grid_voltage on a single-phase
+            # inverter and line_voltage_A_B on a three-phase one — so dropping
+            # one alias marks the address its twin still reads as unreadable,
+            # splitting the block around a register that is being read anyway.
+            # None of these components declare ranges, so dropping them puts
+            # planning back on gaps over exactly the fields that were kept.
+            component.register_ranges = None
+            self._components[(component_class, index)] = component
+
+        self._group = ComponentGroup(unit, self._components.values())
+
+    def matches(self, names: Iterable[str]) -> bool:
+        """Whether this poll already covers exactly ``names``."""
+        return set(self.names) == set(names)
+
+    def covering(self, address: int, count: int) -> list[str]:
+        """Return the register names a block read at ``address`` was covering."""
+        covered = range(address, address + count)
+        found = []
+        for name in self.names:
+            location = REGISTER_LOCATIONS[name]
+            field = location.definition()
+            start = field.address + field.stride * ((location.instance or 1) - 1)
+            if start in covered or (start + field.count - 1) in covered:
+                found.append(name)
+        return found
+
+    async def read(self) -> dict[str, Any]:
+        """Read every component in one pooled pass and return the values by name."""
+        await self._group.async_update()
+        values = {}
+        for name in self.names:
+            location = REGISTER_LOCATIONS[name]
+            values[name] = getattr(self._components[_instance_key(location)], location.field)
+        return values
 
 
 class HuaweiSolarDevice(ABC):
-    """A higher-level interface making it easier to interact with a Huawei Solar inverter."""
+    """A higher-level interface making it easier to interact with a Huawei Solar device."""
 
     model_name: str
     serial_number: str
     update_lock: asyncio.Lock
-    primary_device: "HuaweiSolarDevice | None" = None
+    primary_device: HuaweiSolarDevice | None = None
 
     def __init__(
         self,
-        client: "AsyncHuaweiSolarClient",
+        unit: ModbusUnit,
         model_name: str,
         *,
-        primary_device: "HuaweiSolarDevice | None" = None,
+        primary_device: HuaweiSolarDevice | None = None,
     ) -> None:
         """DO NOT USE THIS CONSTRUCTOR DIRECTLY. Use create() method instead."""
-        self.client = client
+        self.unit = unit
         self.model_name = model_name
+        # Sub-devices share the primary device's lock: they share its Modbus
+        # link, and the inverter answers one conversation at a time.
         self.update_lock = primary_device.update_lock if primary_device else asyncio.Lock()
         self.primary_device = primary_device
+        self._poll: _Poll | None = None
+        self._writable: dict[tuple[type[HuaweiComponent], int], HuaweiComponent] = {}
 
     @classmethod
     async def create(
         cls,
-        client: "AsyncHuaweiSolarClient",
+        unit: ModbusUnit,
         *,
         model_name: str,
-        primary_device: "HuaweiSolarDevice | None" = None,
+        primary_device: HuaweiSolarDevice | None = None,
     ) -> Self:
         """Create instance with the necessary information."""
-        device = cls(
-            client,
-            model_name,
-            primary_device=primary_device,
-        )
-
+        device = cls(unit, model_name, primary_device=primary_device)
         await device._populate_additional_fields()
-
         return device
 
     @abstractmethod
@@ -76,160 +148,153 @@ class HuaweiSolarDevice(ABC):
     def supports_device(cls, model_name: str) -> bool:
         """Check if this class support the given device."""
 
+    # -- reading -------------------------------------------------------------
+
     def _handle_batch_read_error(
         self,
-        _queried_register_names: list[rn.RegisterName],
+        _queried_register_names: list[str],
         exc: HuaweiSolarException,
     ) -> None:
-        """Handle read errors in get."""
+        """Handle read errors in batch_update."""
         raise exc
 
-    def _detect_state_changes(self, new_values: "dict[rn.RegisterName, Result[Any]]") -> None:  # noqa: B027
-        """Update state based on result of batch_update query.
+    def _detect_state_changes(self, new_values: dict[str, Any]) -> None:  # noqa: B027
+        """Update state based on the result of a batch_update query.
 
         Used by subclasses to detect important changes.
         """
 
-    async def _filter_registers(self, register_names: list[rn.RegisterName]) -> list[rn.RegisterName]:
+    async def _filter_registers(self, register_names: list[str]) -> list[str]:
         """Filter registers being requested in batch_update.
 
         Used by subclasses to prevent read-errors in certain cases.
         """
         return register_names
 
-    def _transform_register_values(
-        self,
-        register_name: rn.RegisterName,  # noqa: ARG002
-        result: "Result[Any]",
-    ) -> "Result[Any]":
-        """Optionally Transform the value of a register before returning it."""
-        return result
+    def _transform_register_values(self, register_name: str, value: Any) -> Any:  # noqa: ANN401, ARG002
+        """Optionally transform the value of a register before returning it."""
+        return value
 
-    async def batch_update(self, register_names: list[rn.RegisterName]) -> "dict[rn.RegisterName, Result[Any]]":
-        """Efficiently retrieve the values of all the registers passed in register_names.
-
-        This method adds intelligence on top of read_multiple to only batch together
-        registers that are close together in the inverter's memory map.
-        """
-        if unknown_registers := {register_name for register_name in register_names if register_name not in REGISTERS}:
-            _LOGGER.warning(
-                "Unknown register name passed to batch_update: %s",
-                ", ".join(str(rn) for rn in unknown_registers),
-            )
-
-        class _Register:
-            name: rn.RegisterName
-            register_start: int
-            register_end: int
-
-            def __init__(self, regname: rn.RegisterName) -> None:
-                self.name = regname
-
-                reg = REGISTERS[regname]
-                self.register_start = reg.register
-                self.register_end = reg.register + reg.length - 1
-
-        registers = [_Register(rn) for rn in register_names]
-
-        registers.sort(key=lambda rd: rd.register_start)
+    async def batch_update(self, register_names: list[str]) -> dict[str, Any]:
+        """Read every register in ``register_names`` in as few requests as the device allows."""
+        if unknown := [name for name in register_names if name not in REGISTER_LOCATIONS]:
+            _LOGGER.warning("Unknown register name passed to batch_update: %s", ", ".join(unknown))
+            register_names = [name for name in register_names if name in REGISTER_LOCATIONS]
 
         async with self.update_lock:
-            result = {}
-            first_idx = 0
-            last_idx = 0
+            wanted = await self._filter_registers(register_names)
 
-            while first_idx < len(registers):
-                # Batch together registers:
-                # - as long as the total amount of registers doesn't exceed 64
-                # - as long as the gap between registers is not more than 16
+            if self._poll is None or not self._poll.matches(wanted):
+                self._poll = _Poll(self.unit, wanted)
 
-                while (
-                    last_idx + 1 < len(registers)
-                    and registers[last_idx + 1].register_end - registers[first_idx].register_start
-                    <= MAX_BATCHED_REGISTERS_COUNT
-                    and registers[last_idx + 1].register_start - registers[last_idx].register_end
-                    < MAX_BATCHED_REGISTERS_GAP
-                ):
-                    last_idx += 1
+            _LOGGER.debug("Batch update of the following registers: %s", ", ".join(wanted))
 
-                register_names_to_query = [reg.name for reg in registers[first_idx : last_idx + 1]]
-                register_names_to_query = await self._filter_registers(
-                    register_names_to_query,
-                )
-                _LOGGER.debug(
-                    "Batch update of the following registers: %s",
-                    ", ".join(register_names_to_query),
-                )
+            try:
+                with session.translating("read registers"):
+                    values = await self._poll.read()
+            except HuaweiSolarException as exc:
+                self._handle_batch_read_error(self._failed_registers(exc, wanted), exc)
+                values = {}
 
-                try:
-                    values = await self.client.get_multiple_as_dict(register_names_to_query)
-                except HuaweiSolarException as exc:
-                    self._handle_batch_read_error(register_names_to_query, exc)
-                    values = {}
+            self._detect_state_changes(values)
+            return {name: self._transform_register_values(name, value) for name, value in values.items()}
 
-                self._detect_state_changes(values)
-                result.update(values)
+    def _failed_registers(self, exc: Exception, fallback: list[str]) -> list[str]:
+        """Which registers a failed read was after.
 
-                first_idx = last_idx + 1
-                last_idx = first_idx
+        A refused block read names the block it was refused, so the registers it
+        was covering can be recovered; anything else took the whole poll down.
+        """
+        cause = exc.__cause__
+        if isinstance(cause, ModbusExceptionError) and cause.block is not None and self._poll is not None:
+            return self._poll.covering(cause.block.address, cause.block.count)
+        return fallback
 
-            for key, value in result.items():
-                result[key] = self._transform_register_values(key, value)
+    async def get(self, name: str) -> Any:  # noqa: ANN401
+        """Get the value of a certain register."""
+        return (await self.batch_update([name]))[name]
 
-            return result
+    async def get_multiple(self, names: list[str]) -> dict[str, Any]:
+        """Get the values of several registers."""
+        return await self.batch_update(names)
+
+    # -- writing -------------------------------------------------------------
+
+    def _component_for_write(self, name: str) -> tuple[HuaweiComponent, str]:
+        """Return the component instance to write ``name`` through, and the field name.
+
+        Kept apart from the polling components, which are narrowed to whatever
+        is being read and would refuse a write to a field left out of them.
+        """
+        try:
+            location = REGISTER_LOCATIONS[name]
+        except KeyError as err:
+            msg = f"Invalid register name: {name}"
+            raise ValueError(msg) from err
+
+        key = _instance_key(location)
+        component = self._writable.get(key)
+        if component is None:
+            component = self._writable[key] = key[0](self.unit, key[1])
+        return component, location.field
+
+    async def set(self, name: str, value: Any) -> bool:  # noqa: ANN401
+        """Set a register to a certain value."""
+        component, field = self._component_for_write(name)
+        try:
+            with session.translating(f"write register {name}", failure="write"):
+                await component.write(field, value)
+        except AttributeError as err:
+            msg = f"Register {name} is not writable"
+            raise WriteException(msg) from err
+        return True
 
     async def stop(self) -> bool:
         """Stop the device connection."""
-        if not self.primary_device:
-            # we are the primary device, so we should also stop the client
-            await self.client.disconnect()
-
         return True
-
-    async def get(self, name: rn.RegisterName) -> "Result[Any]":
-        """Get the value of a certain register."""
-        return await self.client.get(name)
-
-    async def set(self, name: rn.RegisterName, value: Any) -> bool:  # noqa: ANN401
-        """Set a register to a certain value."""
-        return await self.client.set(name, value)
 
 
 class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
-    """A HuaweiSolarDevice that requires login to read any registers."""
+    """A HuaweiSolarDevice that needs a login session for privileged registers."""
 
     def __init__(
         self,
-        client: "AsyncHuaweiSolarClient",
+        unit: ModbusUnit,
         model_name: str,
         *,
-        primary_device: "HuaweiSolarDevice | None" = None,
+        primary_device: HuaweiSolarDevice | None = None,
     ) -> None:
         """Initialize with per-instance lock and login state."""
-        super().__init__(client, model_name, primary_device=primary_device)
+        super().__init__(unit, model_name, primary_device=primary_device)
         self.__login_lock = asyncio.Lock()
         self.__heartbeat_enabled = False
         self.__heartbeat_task: asyncio.Task[None] | None = None
         self.__username: str | None = None
         self.__password: str | None = None
+        # A dropped link takes the login session with it. The connection
+        # re-establishes itself on the next request, so nothing here needs to
+        # reconnect — it only has to remember that the session is gone.
+        self.__unsubscribe = unit.on_connection_lost(self._forget_session)
+
+    def _forget_session(self) -> None:
+        """Note that the login session went away with the connection."""
+        if self.__heartbeat_enabled:
+            _LOGGER.debug("Connection lost: the login session is gone, will log in again when needed")
+        self.__heartbeat_enabled = False
 
     async def ensure_logged_in(self, *, force: bool = False) -> bool:
-        """Check if it is necessary to login and performs the necessary login sequence if needed."""
+        """Log in if the session is not (or no longer) established."""
         async with self.__login_lock:
             if force:
-                _LOGGER.debug(
-                    "Forcefully stopping any heartbeat task (if any is still running)",
-                )
+                _LOGGER.debug("Forcefully stopping any heartbeat task (if any is still running)")
                 self.stop_heartbeat()
 
             if self.__username and not self.__heartbeat_enabled:
-                _LOGGER.debug(
-                    "Currently not logged in: logging in now and starting heartbeat",
-                )
+                _LOGGER.debug("Currently not logged in: logging in now and starting heartbeat")
                 if not self.__password:
                     msg = "Password must be set before logging in"
                     raise InvalidCredentials(msg)
-                if not await self.client.login(self.__username, self.__password):
+                if not await session.login(self.unit, self.__username, self.__password):
                     raise InvalidCredentials
 
                 self.start_heartbeat()
@@ -239,7 +304,7 @@ class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
     async def login(self, username: str, password: str) -> bool:
         """Perform the login-sequence with the provided username/password."""
         async with self.__login_lock:
-            if not await self.client.login(username, password):
+            if not await session.login(self.unit, username, password):
                 raise InvalidCredentials
 
             # save the correct login credentials
@@ -257,7 +322,7 @@ class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
             self.__heartbeat_task.cancel()
 
     def start_heartbeat(self) -> None:
-        """Start the heartbeat thread to stay logged in."""
+        """Start the heartbeat task to stay logged in."""
         if not self.__login_lock.locked():
             msg = "start_heartbeat should only be called from within the login_lock"
             raise RuntimeError(msg)
@@ -267,12 +332,8 @@ class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
 
         async def heartbeat() -> None:
             while self.__heartbeat_enabled:
-                try:
-                    self.__heartbeat_enabled = await self.client.heartbeat()
-                    await asyncio.sleep(HEARTBEAT_INTERVAL)
-                except HuaweiSolarException as err:
-                    _LOGGER.warning("Heartbeat stopped because of, %s", err)
-                    self.__heartbeat_enabled = False
+                self.__heartbeat_enabled = await session.heartbeat(self.unit)
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
 
         self.__heartbeat_enabled = True
         self.__heartbeat_task = asyncio.create_task(heartbeat())
@@ -280,87 +341,68 @@ class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
     async def stop(self) -> bool:
         """Stop the device."""
         self.stop_heartbeat()
+        self.__unsubscribe()
 
         return await super().stop()
 
     async def read_file(self, file_type: int, customized_data: bytes | None = None) -> bytes:
-        """Wrap `get_file` from `AsyncHuaweiSolarClient`.
-
-        This method adds a retry-logic for when the login-sequence needs to be repeated.
-        """
+        """Read a file from the device, logging in again if the session lapsed."""
         logged_in = await self.ensure_logged_in()
 
         if not logged_in:
-            _LOGGER.warning(
-                "Could not login, reading file %x will probably fail",
-                file_type,
-            )
+            _LOGGER.warning("Could not login, reading file %x will probably fail", file_type)
 
         try:
             async with self.update_lock:
-                return await self.client.get_file(file_type, customized_data)
+                return await session.read_file(self.unit, file_type, customized_data)
         except PermissionDeniedError:
-            if self.__username:
-                logged_in = await self.ensure_logged_in(force=True)
+            if not self.__username:
+                raise  # no credentials available, pass the permission error on
 
-                if not logged_in:
-                    _LOGGER.exception("Could not login to read file %x", file_type)
-                    raise
+            if not await self.ensure_logged_in(force=True):
+                _LOGGER.exception("Could not login to read file %x", file_type)
+                raise
 
-                async with self.update_lock:
-                    return await self.client.get_file(
-                        file_type,
-                        customized_data,
-                    )
-
-            # we have no login-credentials available, pass on permission error
-            raise
+            async with self.update_lock:
+                return await session.read_file(self.unit, file_type, customized_data)
 
     ############################
     # Everything write-related #
     ############################
 
     async def has_write_permission(self) -> bool:
-        """Test write permission by getting the time zone and trying to write that same value back to the inverter."""
+        """Check write permission by writing the time zone back unchanged."""
         try:
-            result = await self.client.get(WRITE_TEST_REGISTER)
-
-            await super().set(WRITE_TEST_REGISTER, result.value)
+            await super().set(WRITE_TEST_REGISTER, await self.get(WRITE_TEST_REGISTER))
         except (PermissionDeniedError, WriteException):
-            # We not only catch PermissionDeniedError but also WriteException, because in some firmware versions,
-            # a ServerDeviceFailure error is raised when trying to write to a register without permission, which
-            # propagates up as a WriteException in our code. (cfr. https://github.com/wlcrs/huawei-solar-lib/issues/28)
+            # Not only PermissionDeniedError: some firmware versions answer a
+            # write they will not allow with a plain server-device-failure.
+            # cfr. https://github.com/wlcrs/huawei-solar-lib/issues/28
             return False
         else:
             return True
 
-    async def set(self, name: rn.RegisterName, value: Any) -> bool:  # noqa: ANN401
+    async def set(self, name: str, value: Any) -> bool:  # noqa: ANN401
         """Set a register to a certain value."""
         logged_in = await self.ensure_logged_in()  # we must login again before trying to set the value
 
         if not logged_in:
-            _LOGGER.warning("Could not login, setting, %s will probably fail", name)
+            _LOGGER.warning("Could not login, setting %s will probably fail", name)
 
         if self.__heartbeat_enabled:
-            try:
-                await self.client.heartbeat()
-            except HuaweiSolarException:
-                _LOGGER.warning("Failed to perform heartbeat before write")
+            await session.heartbeat(self.unit)
 
         try:
             return await super().set(name, value)
         except PermissionDeniedError:
-            if self.__username:
-                logged_in = await self.ensure_logged_in(force=True)
+            if not self.__username:
+                raise  # no credentials available, pass the permission error on
 
-                if not logged_in:
-                    _LOGGER.exception("Could not login to set %s", name)
-                    raise
+            if not await self.ensure_logged_in(force=True):
+                _LOGGER.exception("Could not login to set %s", name)
+                raise
 
-                # Force a heartbeat first when connected with username/password credentials
-                await self.client.heartbeat()
+            # Force a heartbeat first when connected with username/password credentials
+            await session.heartbeat(self.unit)
 
-                return await super().set(name, value)
-
-            # we have no login-credentials available, pass on permission error
-            raise
+            return await super().set(name, value)

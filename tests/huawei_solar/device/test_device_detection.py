@@ -1,8 +1,14 @@
-"""Tests for device detection in huawei_solar.device.__init__."""
+"""Tests for device detection in huawei_solar.device.__init__.
 
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, Mock
+These drive a real in-memory Modbus unit rather than a stubbed client, so the
+probe chain is exercised the way it runs against a device: a register the device
+does not serve answers with a Modbus exception, and detection falls through to
+the next probe.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from huawei_solar.device.emma import EMMADevice
@@ -12,23 +18,55 @@ from huawei_solar.device.sdongle import SDongleDevice
 from huawei_solar.device.smartlogger import SmartLoggerDevice
 from huawei_solar.device.sun2000 import SUN2000Device
 from huawei_solar.exceptions import DeviceDetectionError, ReadException
-from tmodbus.exceptions import IllegalDataAddressError
+from huawei_solar.registry import REGISTER_LOCATIONS
+from modbus_connection import IllegalDataAddressError, IllegalDataValueError, ServerDeviceFailureError
+from modbus_connection.mock import MockModbusConnection, MockModbusUnit
 
 from huawei_solar import register_names as rn
 from huawei_solar.device import DEFAULT_SDONGLE_UNIT_ID, detect_device_type, get_device_class_for_model
 
-_READ_FAILED_MSG = "Failed to read register"
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+ILLEGAL_DATA_ADDRESS = 0x02
+ILLEGAL_DATA_VALUE = 0x03
+
+# Every register the probe chain can reach for, in the order it tries them.
+PROBE_REGISTERS = (
+    rn.SDONGLE_DEVICE_SEARCH_STATUS,
+    rn.MODEL_NAME,
+    rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN,
+    rn.SMARTLOGGER_DEVICE_NAME,
+    rn.SMARTLOGGER_EXTERNAL_METER_ACTIVE_POWER,
+)
 
 
-def _value_result(value: str | float) -> SimpleNamespace:
-    return SimpleNamespace(value=value)
+def _span(name: str) -> range:
+    location = REGISTER_LOCATIONS[name]
+    field = location.definition()
+    start = field.address + field.stride * ((location.instance or 1) - 1)
+    return range(start, start + field.count)
 
 
-def _client_with_get(unit_id: int, side_effect: Any) -> Mock:  # noqa: ANN401
-    client = Mock()
-    client.unit_id = unit_id
-    client.get = AsyncMock(side_effect=side_effect)
-    return client
+def _unit(
+    answers: dict[str, Any] | None = None,
+    *,
+    absent: Iterable[str] = PROBE_REGISTERS,
+    error: Exception | None = None,
+) -> MockModbusUnit:
+    """Build a mock unit that answers ``answers`` and refuses everything in ``absent``."""
+    unit = MockModbusConnection().for_unit(1)
+    answers = answers or {}
+    for name in absent:
+        if name in answers:
+            continue
+        for address in _span(name):
+            unit.fail_read(address, error or IllegalDataAddressError())
+    for name, value in answers.items():
+        words = REGISTER_LOCATIONS[name].definition().encode(value)
+        for offset, word in enumerate(words):
+            unit.holding[_span(name).start + offset] = word
+    return unit
 
 
 @pytest.fixture
@@ -81,61 +119,27 @@ async def test_detect_device_type_from_model_name(
     model_name: str,
     expected_class: type,
 ) -> None:
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register == rn.MODEL_NAME:
-            return _value_result(model_name)
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(_unit({rn.MODEL_NAME: model_name}), 1)
 
     assert detected_class is expected_class
     assert detected_name == model_name
 
 
-async def test_detect_device_type_smartlogger_when_model_name_illegal(
+@pytest.mark.parametrize("error", [IllegalDataAddressError(), IllegalDataValueError()])
+async def test_detect_device_type_smartlogger_when_model_name_unavailable(
     patched_supports_device: None,
+    error: Exception,
 ) -> None:
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register == rn.MODEL_NAME:
-            raise ReadException(_READ_FAILED_MSG, modbus_exception_code=IllegalDataAddressError.error_code)
-        if register == rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN:
-            return _value_result("123456789012")
-        if register == rn.SMARTLOGGER_DEVICE_NAME:
-            return _value_result("smartlogger-model")
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
+    """Firmwares differ on which exception code means 'no such register'; both fall through."""
+    unit = _unit(
+        {
+            rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN: "123456789012",
+            rn.SMARTLOGGER_DEVICE_NAME: "smartlogger-model",
+        },
+        error=error,
+    )
 
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
-
-    assert detected_class is SmartLoggerDevice
-    assert detected_name == "smartlogger-model"
-
-
-@pytest.mark.parametrize("modbus_exception_code", [0x02, 0x03])
-async def test_detect_device_type_smartlogger_when_model_name_read_exception(
-    patched_supports_device: None,
-    modbus_exception_code: int,
-) -> None:
-    """register_client.get() wraps modbus exceptions in ReadException — the fallback chain must follow."""
-
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register == rn.MODEL_NAME:
-            raise ReadException(_READ_FAILED_MSG, modbus_exception_code=modbus_exception_code)
-        if register == rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN:
-            return _value_result("123456789012")
-        if register == rn.SMARTLOGGER_DEVICE_NAME:
-            return _value_result("smartlogger-model")
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(unit, 1)
 
     assert detected_class is SmartLoggerDevice
     assert detected_name == "smartlogger-model"
@@ -145,29 +149,16 @@ async def test_detect_device_type_propagates_unrelated_read_exception(
     patched_supports_device: None,
 ) -> None:
     """Modbus exception codes other than 0x02/0x03 must propagate, not be swallowed."""
-
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register == rn.MODEL_NAME:
-            raise ReadException(_READ_FAILED_MSG, modbus_exception_code=0x04)  # Server Device Failure
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
+    unit = _unit(absent=[rn.MODEL_NAME], error=ServerDeviceFailureError())
 
     with pytest.raises(ReadException):
-        await detect_device_type(client)
+        await detect_device_type(unit, 1)
 
 
 async def test_detect_device_type_sdongle_fast_track_on_unit_100() -> None:
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register == rn.SDONGLE_DEVICE_SEARCH_STATUS:
-            return _value_result("done")
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
+    unit = _unit({rn.SDONGLE_DEVICE_SEARCH_STATUS: 1})
 
-    client = _client_with_get(unit_id=DEFAULT_SDONGLE_UNIT_ID, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(unit, DEFAULT_SDONGLE_UNIT_ID)
 
     assert detected_class is SDongleDevice
     assert detected_name == "SDongle"
@@ -175,18 +166,9 @@ async def test_detect_device_type_sdongle_fast_track_on_unit_100() -> None:
 
 async def test_detect_device_type_smartlogger_via_esn_fallback() -> None:
     """Firmwares with neither MODEL_NAME nor SMARTLOGGER_DEVICE_NAME still expose the ESN."""
+    unit = _unit({rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN: "102120056473"})
 
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register in (rn.MODEL_NAME, rn.SMARTLOGGER_DEVICE_NAME):
-            raise ReadException(_READ_FAILED_MSG, modbus_exception_code=0x03)
-        if register == rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN:
-            return _value_result("102120056473")
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=7, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(unit, 7)
 
     assert detected_class is SmartLoggerDevice
     assert detected_name == "SmartLogger"
@@ -194,69 +176,25 @@ async def test_detect_device_type_smartlogger_via_esn_fallback() -> None:
 
 async def test_detect_device_type_meter_via_active_power_probe() -> None:
     """Power meters expose neither MODEL_NAME nor SMARTLOGGER_DEVICE_NAME, but answer 32278."""
+    unit = _unit({rn.SMARTLOGGER_EXTERNAL_METER_ACTIVE_POWER: -1394})
 
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register in (
-            rn.MODEL_NAME,
-            rn.SMARTLOGGER_DEVICE_NAME,
-            rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN,
-        ):
-            raise ReadException(_READ_FAILED_MSG, modbus_exception_code=0x03)
-        if register == rn.SMARTLOGGER_EXTERNAL_METER_ACTIVE_POWER:
-            return _value_result(-1.394)
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=11, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(unit, 11)
 
     assert detected_class is MeterDevice
     assert detected_name == "PowerMeter"
 
 
 async def test_detect_device_type_sdongle_fallback_when_other_registers_illegal() -> None:
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register in (
-            rn.MODEL_NAME,
-            rn.SMARTLOGGER_DEVICE_NAME,
-            rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN,
-            rn.SMARTLOGGER_EXTERNAL_METER_ACTIVE_POWER,
-        ):
-            raise ReadException(
-                _READ_FAILED_MSG,
-                modbus_exception_code=IllegalDataAddressError.error_code,
-            )
-        if register == rn.SDONGLE_DEVICE_SEARCH_STATUS:
-            return _value_result("done")
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
+    unit = _unit({rn.SDONGLE_DEVICE_SEARCH_STATUS: 1})
 
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
-
-    detected_class, detected_name = await detect_device_type(client)
+    detected_class, detected_name = await detect_device_type(unit, 1)
 
     assert detected_class is SDongleDevice
     assert detected_name == "SDongle"
 
 
 async def test_detect_device_type_raises_when_no_detection_path_matches() -> None:
-    def side_effect(register: str) -> Any:  # noqa: ANN401
-        if register in (
-            rn.MODEL_NAME,
-            rn.SMARTLOGGER_DEVICE_NAME,
-            rn.SMARTLOGGER_EQUIPMENT_SERIAL_NUMBER_ESN,
-            rn.SMARTLOGGER_EXTERNAL_METER_ACTIVE_POWER,
-            rn.SDONGLE_DEVICE_SEARCH_STATUS,
-        ):
-            raise ReadException(
-                _READ_FAILED_MSG,
-                modbus_exception_code=IllegalDataAddressError.error_code,
-            )
-        msg = f"Unexpected register read: {register!r}"
-        raise AssertionError(msg)
-
-    client = _client_with_get(unit_id=1, side_effect=side_effect)
+    unit = _unit()
 
     with pytest.raises(DeviceDetectionError, match="Unable to detect the device type"):
-        await detect_device_type(client)
+        await detect_device_type(unit, 1)

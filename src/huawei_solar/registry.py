@@ -8,7 +8,7 @@ generated from the register map so the two cannot drift apart.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from huawei_solar.components import emma, scharger, sdongle, shared, smartlogger, sun2000
 
@@ -27,12 +27,17 @@ class RegisterLocation(NamedTuple):
     field: str
     """The attribute name on that component."""
 
-    index: int | None
+    instance: int | None
     """Which instance, for a component that exists once per string, unit or pack."""
 
-    @property
-    def definition(self) -> RegisterField:
-        """The field object itself."""
+    def definition(self) -> RegisterField[Any]:
+        """Return the field object itself.
+
+        A method rather than a property on purpose: ``RegisterField`` is a
+        descriptor, and a type checker applies its ``__get__`` to anything typed
+        as one that is reached by attribute access — re-typing the field object
+        itself as the value it decodes to. Calling for it sidesteps that.
+        """
         return self.component.declared_fields[self.field]  # type: ignore[return-value]
 
 

@@ -213,6 +213,18 @@ def i32_absolute(address: int, **kwargs: Any) -> AbsoluteValueField:
     return field
 
 
+def bytes_to_string(value: bytes) -> str:
+    """Decode Huawei text: UTF-8 up to the first NUL, garbage after it.
+
+    Huawei pads the tail of a string with leftover buffer content rather than
+    zeroes, so everything from the first NUL on is dropped rather than stripped.
+    """
+    null_byte_index = value.find(b"\x00")
+    if null_byte_index != -1:
+        value = value[:null_byte_index]
+    return value.decode("utf-8", errors="backslashreplace")
+
+
 class HuaweiStringField(RegisterField[str]):
     """A UTF-8 string register, truncated at the first NUL.
 
@@ -223,11 +235,7 @@ class HuaweiStringField(RegisterField[str]):
 
     def decode(self, words: list[int], scale_exponent: int | None = None) -> str:
         """Decode the registers as UTF-8 up to the first NUL."""
-        raw = b"".join((word & 0xFFFF).to_bytes(2, "big") for word in words)
-        nul = raw.find(b"\x00")
-        if nul != -1:
-            raw = raw[:nul]
-        return raw.decode("utf-8", errors="backslashreplace")
+        return bytes_to_string(b"".join((word & 0xFFFF).to_bytes(2, "big") for word in words))
 
     def encode(self, value: Any, scale_exponent: int | None = None) -> list[int]:
         """Encode a string, NUL-padded to this field's register count."""

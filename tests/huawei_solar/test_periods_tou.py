@@ -6,15 +6,23 @@ from unittest.mock import MagicMock
 import huawei_solar.register_names as rn
 import pytest
 from huawei_solar.exceptions import TimeOfUsePeriodsException
-from huawei_solar.register_definitions.periods import (
+from huawei_solar.periods import (
     ChargeFlag,
     HUAWEI_LUNA2000_TimeOfUsePeriod,
     LG_RESU_TimeOfUsePeriod,
+    validate_huawei_luna2000_tou_periods,
+    validate_lg_resu_tou_periods,
 )
-from huawei_solar.registers import REGISTERS
+from huawei_solar.registry import REGISTER_LOCATIONS
 
-huawei_ppr = REGISTERS[rn.STORAGE_HUAWEI_LUNA2000_TIME_OF_USE_CHARGING_AND_DISCHARGING_PERIODS]
-lg_ppr = REGISTERS[rn.STORAGE_LG_RESU_TIME_OF_USE_PRICE_PERIODS]
+
+def as_bytes(words: list[int]) -> bytes:
+    """Render encoded registers as the bytes they go on the wire as."""
+    return b"".join(word.to_bytes(2, "big") for word in words)
+
+
+huawei_ppr = REGISTER_LOCATIONS[rn.STORAGE_HUAWEI_LUNA2000_TIME_OF_USE_CHARGING_AND_DISCHARGING_PERIODS].definition()
+lg_ppr = REGISTER_LOCATIONS[rn.STORAGE_LG_RESU_TIME_OF_USE_PRICE_PERIODS].definition()
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__too_long_span__start_time() -> None:
@@ -28,7 +36,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__too_long_span__start_time() ->
         expected_exception=TimeOfUsePeriodsException,
         match=r"TOU period is invalid \(Spans over more than one day\)",
     ):
-        huawei_ppr._validate([tou])
+        validate_huawei_luna2000_tou_periods([tou])
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__too_long_span__end_time() -> None:
@@ -42,7 +50,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__too_long_span__end_time() -> N
         expected_exception=TimeOfUsePeriodsException,
         match=r"TOU period is invalid \(Spans over more than one day\)",
     ):
-        huawei_ppr._validate([tou])
+        validate_huawei_luna2000_tou_periods([tou])
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__negative__start_time() -> None:
@@ -56,7 +64,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__negative__start_time() -> None
         expected_exception=TimeOfUsePeriodsException,
         match=r"TOU period is invalid \(Below zero\)",
     ):
-        huawei_ppr._validate([tou])
+        validate_huawei_luna2000_tou_periods([tou])
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__negative__end_time() -> None:
@@ -70,7 +78,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__negative__end_time() -> None:
         expected_exception=TimeOfUsePeriodsException,
         match=r"TOU period is invalid \(Below zero\)",
     ):
-        huawei_ppr._validate([tou])
+        validate_huawei_luna2000_tou_periods([tou])
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__start_time_bigger_than_end_time() -> None:
@@ -84,7 +92,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__start_time_bigger_than_end_tim
         expected_exception=TimeOfUsePeriodsException,
         match=r"TOU period is invalid \(start-time is greater than end-time\)",
     ):
-        huawei_ppr._validate([tou])
+        validate_huawei_luna2000_tou_periods([tou])
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__overlapping__1() -> None:
@@ -106,7 +114,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__overlapping__1() -> None:
         expected_exception=TimeOfUsePeriodsException,
         match="TOU periods are overlapping",
     ):
-        huawei_ppr._validate(tou)
+        validate_huawei_luna2000_tou_periods(tou)
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__overlapping__2() -> None:
@@ -128,7 +136,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__overlapping__2() -> None:
         expected_exception=TimeOfUsePeriodsException,
         match="TOU periods are overlapping",
     ):
-        huawei_ppr._validate(tou)
+        validate_huawei_luna2000_tou_periods(tou)
 
 
 def test__validate__tou_periods__HUAWEI_LUNA2000__OK() -> None:
@@ -146,13 +154,13 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__OK() -> None:
             days_effective=(False, True, True, True, True, True, True),
         ),
     ]
-    huawei_ppr._validate(tou)
+    validate_huawei_luna2000_tou_periods(tou)
 
     encoded = huawei_ppr.encode(tou)
 
-    encoded_bytes = struct.pack(f">{huawei_ppr.format}", *encoded)
+    encoded_bytes = as_bytes(encoded)
 
-    assert len(encoded_bytes) == huawei_ppr.length * 2
+    assert len(encoded_bytes) == huawei_ppr.count * 2
     validation_bytes = struct.pack(
         ">43H",
         *[
@@ -220,9 +228,9 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__OK_2() -> None:
             days_effective=(True, True, True, True, True, True, True),
         ),
     ]
-    huawei_ppr._validate(tou)
+    validate_huawei_luna2000_tou_periods(tou)
     encoded = huawei_ppr.encode(tou)
-    encoded_bytes = struct.pack(f">{huawei_ppr.format}", *encoded)
+    encoded_bytes = as_bytes(encoded)
     assert encoded_bytes == struct.pack(
         ">43H",
         *[
@@ -272,7 +280,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__OK_2() -> None:
         ],
     )
 
-    decoded = huawei_ppr.decode(encoded).value
+    decoded = huawei_ppr.decode(encoded)
 
     assert decoded == tou
 
@@ -293,9 +301,9 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__OK__different_days() -> None:
         ),
     ]
 
-    huawei_ppr._validate(tou)
+    validate_huawei_luna2000_tou_periods(tou)
     encoded = huawei_ppr.encode(tou)
-    encoded_bytes = struct.pack(f">{huawei_ppr.format}", *encoded)
+    encoded_bytes = as_bytes(encoded)
 
     assert encoded_bytes == struct.pack(
         ">43H",
@@ -346,7 +354,7 @@ def test__validate__tou_periods__HUAWEI_LUNA2000__OK__different_days() -> None:
         ],
     )
 
-    decoded = huawei_ppr.decode(encoded).value
+    decoded = huawei_ppr.decode(encoded)
     assert decoded == tou
 
 
@@ -355,9 +363,9 @@ def test__validate__tou_periodsG__RESU___OK() -> None:
         LG_RESU_TimeOfUsePeriod(start_time=5, end_time=15, electricity_price=1),
         LG_RESU_TimeOfUsePeriod(start_time=16, end_time=20, electricity_price=1),
     ]
-    lg_ppr._validate(tou)
+    validate_lg_resu_tou_periods(tou)
     encoded = lg_ppr.encode(tou)
-    encoded_bytes = struct.pack(f">{lg_ppr.format}", *encoded)
+    encoded_bytes = as_bytes(encoded)
 
     validation_bytes = struct.pack(
         ">41H",
@@ -408,7 +416,7 @@ def test__validate__tou_periodsG__RESU___OK() -> None:
 
     assert encoded_bytes == validation_bytes
 
-    decoded = lg_ppr.decode(encoded).value
+    decoded = lg_ppr.decode(encoded)
     assert decoded == tou
 
 
@@ -421,7 +429,7 @@ def test__validate__tou_periodsG__RESU___overlaping() -> None:
         expected_exception=TimeOfUsePeriodsException,
         match="TOU periods are overlapping",
     ):
-        lg_ppr._validate(tou)
+        validate_lg_resu_tou_periods(tou)
 
 
 def test__validate__tou_periods__unknown_type() -> None:
@@ -433,13 +441,13 @@ def test__validate__tou_periods__unknown_type() -> None:
         expected_exception=TimeOfUsePeriodsException,
         match="TOU period is of an unexpected type",
     ):
-        huawei_ppr._validate(tou)
+        validate_huawei_luna2000_tou_periods(tou)
 
 
 def test__validate__data_type__none() -> None:
-    huawei_ppr._validate([])
+    validate_huawei_luna2000_tou_periods([])
 
     encoded = huawei_ppr.encode([])
-    encoded_bytes = struct.pack(f">{huawei_ppr.format}", *encoded)
+    encoded_bytes = as_bytes(encoded)
 
-    assert encoded_bytes == b"\x00\x00" * huawei_ppr.length
+    assert encoded_bytes == b"\x00\x00" * huawei_ppr.count

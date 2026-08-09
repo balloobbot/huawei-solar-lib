@@ -1,5 +1,14 @@
 """Interact with Huawei inverters over Modbus."""
 
+from .connection import (
+    HuaweiModbusConnection,
+    HuaweiUnit,
+    SupportsHuaweiPdu,
+    create_rtu_connection,
+    create_scan_rtu_connection,
+    create_scan_tcp_connection,
+    create_tcp_connection,
+)
 from .device import (
     EMMADevice,
     HuaweiSolarDevice,
@@ -21,6 +30,7 @@ from .exceptions import (
     HuaweiSolarException,
     InvalidCredentials,
     PeakPeriodsValidationError,
+    PermissionDeniedError,
     ReadException,
     TimeOfUsePeriodsException,
     WriteException,
@@ -32,12 +42,20 @@ from .files import (
     OptimizerRunningStatus,
     OptimizerSystemInformation,
 )
-from .modbus_client import AsyncHuaweiSolarClient, create_rtu_client, create_tcp_client
-from .register_definitions import Result
+from .periods import (
+    ChargeDischargePeriod,
+    ChargeFlag,
+    HUAWEI_LUNA2000_TimeOfUsePeriod,
+    LG_RESU_TimeOfUsePeriod,
+    PeakSettingPeriod,
+)
 from .register_names import RegisterName
+from .registry import REGISTER_LOCATIONS, RegisterLocation
 
 __all__ = [
-    "AsyncHuaweiSolarClient",
+    "REGISTER_LOCATIONS",
+    "ChargeDischargePeriod",
+    "ChargeFlag",
     "ConnectionException",
     "ConnectionInterruptedException",
     "DecodeError",
@@ -45,10 +63,14 @@ __all__ = [
     "DeviceInfo",
     "EMMADevice",
     "EncodeError",
+    "HUAWEI_LUNA2000_TimeOfUsePeriod",
+    "HuaweiModbusConnection",
     "HuaweiSolarDevice",
     "HuaweiSolarDeviceWithLogin",
     "HuaweiSolarException",
+    "HuaweiUnit",
     "InvalidCredentials",
+    "LG_RESU_TimeOfUsePeriod",
     "MeterDevice",
     "OptimizerHistoryRealTimeDataUnit",
     "OptimizerOnlineStatus",
@@ -56,19 +78,24 @@ __all__ = [
     "OptimizerRunningStatus",
     "OptimizerSystemInformation",
     "PeakPeriodsValidationError",
+    "PeakSettingPeriod",
+    "PermissionDeniedError",
     "ReadException",
+    "RegisterLocation",
     "RegisterName",
-    "Result",
     "SChargerDevice",
     "SDongleDevice",
     "SUN2000Device",
     "SmartLoggerDevice",
+    "SupportsHuaweiPdu",
     "TimeOfUsePeriodsException",
     "WriteException",
     "create_device_instance",
-    "create_rtu_client",
+    "create_rtu_connection",
+    "create_scan_rtu_connection",
+    "create_scan_tcp_connection",
     "create_sub_device_instance",
-    "create_tcp_client",
+    "create_tcp_connection",
     "get_device_identifiers",
     "get_device_infos",
 ]

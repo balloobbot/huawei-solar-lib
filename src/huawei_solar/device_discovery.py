@@ -5,17 +5,9 @@ import struct
 from dataclasses import dataclass
 from typing import Literal
 
-from tmodbus.client import AsyncModbusClient
-from tmodbus.exceptions import (
-    ModbusConnectionError,
-    ModbusResponseError,
-    ServerDeviceBusyError,
-    ServerDeviceFailureError,
-    TModbusError,
-)
+from modbus_connection import ModbusUnit
 
-from huawei_solar.exceptions import ConnectionInterruptedException, ReadException
-from huawei_solar.modbus_pdu import PermissionDeniedError
+from huawei_solar import session
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,9 +39,9 @@ class DeviceIdentifier:
     other_data: dict[int, bytes]
 
 
-async def get_device_identifiers(client: AsyncModbusClient) -> DeviceIdentifier:
+async def get_device_identifiers(unit: ModbusUnit) -> DeviceIdentifier:
     """Read the device identifiers from the inverter."""
-    objects = await _read_device_identifier_objects(client, 0x01, 0x00)
+    objects = await _read_device_identifier_objects(unit, 0x01, 0x00)
 
     return DeviceIdentifier(
         vendor=objects.pop(0x00).decode("ascii"),
@@ -59,9 +51,9 @@ async def get_device_identifiers(client: AsyncModbusClient) -> DeviceIdentifier:
     )
 
 
-async def get_device_infos(client: AsyncModbusClient) -> list[DeviceInfo]:
+async def get_device_infos(unit: ModbusUnit) -> list[DeviceInfo]:
     """Read the device infos from the inverter."""
-    objects = await _read_device_identifier_objects(client, 0x03, DEVICE_INFOS_START_OBJECT_ID)
+    objects = await _read_device_identifier_objects(unit, 0x03, DEVICE_INFOS_START_OBJECT_ID)
 
     def _parse_device_entry(device_info_str: str) -> DeviceInfo:
         raw_device_info: dict[int, str] = {}
@@ -99,36 +91,9 @@ async def get_device_infos(client: AsyncModbusClient) -> list[DeviceInfo]:
 
 
 async def _read_device_identifier_objects(
-    client: AsyncModbusClient,
+    unit: ModbusUnit,
     read_dev_id_code: Literal[0x01, 0x03],
     object_id: int,
 ) -> dict[int, bytes]:
     """Read all the objects of a certain ReadDevId code."""
-    try:
-        return await client.read_device_identification(
-            device_code=read_dev_id_code,
-            object_id=object_id,
-        )
-    except (ServerDeviceBusyError, ServerDeviceFailureError, PermissionDeniedError) as err:
-        _LOGGER.debug(
-            "Got a %s while reading device identification from server %d",
-            type(err).__name__,
-            client.unit_id,
-        )
-        msg = (
-            "Exception occurred while trying to read device infos "
-            f"{hex(err.error_code) if err.error_code else 'no exception code'}"
-        )
-        raise ReadException(msg, modbus_exception_code=err.error_code) from err
-    except ModbusResponseError as e:
-        msg = (
-            f"Exception occurred while trying to read device infos "
-            f"{hex(e.error_code) if e.error_code else 'no exception code'}"
-        )
-        raise ReadException(msg, modbus_exception_code=e.error_code) from e
-    except ModbusConnectionError as err:
-        msg = "Connection failed when trying to read device infos"
-        raise ConnectionInterruptedException(msg) from err
-    except TModbusError as err:
-        msg = f"Failed to read device infos: {err}"
-        raise ReadException(msg) from err
+    return await session.read_device_identification(unit, read_dev_id_code, object_id)

@@ -24,7 +24,7 @@ provide them.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from modbus_connection import (
     ModbusSerialParams,
@@ -38,6 +38,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from tmodbus.pdu.base import RT, BaseClientPDU
+
+#: The ReadDevId codes tmodbus accepts for function code 0x2B / 0x0E.
+DeviceCode = Literal[1, 2, 3, 4]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,7 +91,7 @@ class SupportsHuaweiPdu(Protocol):
         """Send a raw application PDU to this unit and return its decoded response."""
         ...
 
-    async def read_device_identification_objects(self, device_code: int, object_id: int) -> dict[int, bytes]:
+    async def read_device_identification_objects(self, device_code: DeviceCode, object_id: int) -> dict[int, bytes]:
         """Read FC 0x2B/0x0E objects for an arbitrary device code and object id."""
         ...
 
@@ -137,7 +140,7 @@ class HuaweiUnit(_TmodbusUnit):
         async with self._conn._pacer.paced(self._unit_id):  # noqa: SLF001
             return await self._client.execute(pdu)
 
-    async def read_device_identification_objects(self, device_code: int, object_id: int) -> dict[int, bytes]:
+    async def read_device_identification_objects(self, device_code: DeviceCode, object_id: int) -> dict[int, bytes]:
         """Read FC 0x2B/0x0E objects for an arbitrary device code and object id.
 
         ``ModbusUnit.read_device_identification()`` takes no arguments and the

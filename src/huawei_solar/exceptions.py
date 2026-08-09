@@ -63,3 +63,12 @@ class InvalidCredentials(HuaweiSolarException):
 
 class UnsupportedDeviceException(HuaweiSolarException):
     """No bridge class is available for this device."""
+
+
+class PermissionDeniedError(HuaweiSolarException):
+    """The device refused the request because no login session is established.
+
+    Huawei answers with the private Modbus exception code ``0x80`` for this.
+    ``modbus_connection`` has no way to register a vendor exception code, so the
+    code is recognised here and turned into this exception at the boundary.
+    """

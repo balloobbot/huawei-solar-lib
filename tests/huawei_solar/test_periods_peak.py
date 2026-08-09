@@ -3,10 +3,10 @@
 import huawei_solar.register_names as rn
 import pytest
 from huawei_solar.exceptions import PeakPeriodsValidationError
-from huawei_solar.register_definitions.periods import PeakSettingPeriod
-from huawei_solar.registers import REGISTERS
+from huawei_solar.periods import PeakSettingPeriod, validate_peak_setting_periods
+from huawei_solar.registry import REGISTER_LOCATIONS
 
-ppr = REGISTERS[rn.STORAGE_CAPACITY_CONTROL_PERIODS]
+ppr = REGISTER_LOCATIONS[rn.STORAGE_CAPACITY_CONTROL_PERIODS].definition()
 
 
 def test_simple() -> None:
@@ -19,7 +19,7 @@ def test_simple() -> None:
         ),
     ]
 
-    ppr._validate(pp_valid)
+    validate_peak_setting_periods(pp_valid)
 
 
 def test_invalid_start_time() -> None:
@@ -36,7 +36,7 @@ def test_invalid_start_time() -> None:
         expected_exception=PeakPeriodsValidationError,
         match="Every day must be covered from 00:00",
     ):
-        ppr._validate(pp)
+        validate_peak_setting_periods(pp)
 
 
 def test_invalid_end_time() -> None:
@@ -53,7 +53,7 @@ def test_invalid_end_time() -> None:
         expected_exception=PeakPeriodsValidationError,
         match="Every day must be covered until 23:59",
     ):
-        ppr._validate(pp)
+        validate_peak_setting_periods(pp)
 
     pp2 = [
         PeakSettingPeriod(
@@ -68,7 +68,7 @@ def test_invalid_end_time() -> None:
         expected_exception=PeakPeriodsValidationError,
         match="Every day must be covered until 23:59",
     ):
-        ppr._validate(pp2)
+        validate_peak_setting_periods(pp2)
 
 
 def test_all_days_of_week_covered() -> None:
@@ -85,7 +85,7 @@ def test_all_days_of_week_covered() -> None:
         expected_exception=PeakPeriodsValidationError,
         match="All days of the week need to be covered",
     ):
-        ppr._validate(pp)
+        validate_peak_setting_periods(pp)
 
 
 def test_multiple_periods_on_a_day() -> None:
@@ -110,10 +110,10 @@ def test_multiple_periods_on_a_day() -> None:
         ),
     ]
 
-    ppr._validate(pp)
+    validate_peak_setting_periods(pp)
 
     encoded = ppr.encode(pp)
-    assert ppr.decode(encoded).value == pp
+    assert ppr.decode(encoded) == pp
 
     pp2 = [
         PeakSettingPeriod(
@@ -136,7 +136,7 @@ def test_multiple_periods_on_a_day() -> None:
         ),
     ]
 
-    ppr._validate(pp2)
+    validate_peak_setting_periods(pp2)
 
     pp3 = [
         PeakSettingPeriod(
@@ -163,7 +163,7 @@ def test_multiple_periods_on_a_day() -> None:
         expected_exception=PeakPeriodsValidationError,
         match="All moments of each day need to be covered",
     ):
-        ppr._validate(pp3)
+        validate_peak_setting_periods(pp3)
 
 
 def test_capacity_control_register() -> None:
@@ -183,10 +183,10 @@ def test_capacity_control_register() -> None:
         ),
     ]
 
-    pspr = REGISTERS[rn.STORAGE_CAPACITY_CONTROL_PERIODS]
+    pspr = REGISTER_LOCATIONS[rn.STORAGE_CAPACITY_CONTROL_PERIODS].definition()
 
     payload = pspr.encode(value)
 
-    decoded_result = pspr.decode(payload).value
+    decoded_result = pspr.decode(payload)
 
     assert decoded_result == value

@@ -34,10 +34,10 @@ def canonical(value: Any) -> str:
 
 def effective_address(location: RegisterLocation) -> int:
     """Resolve the address this location reads, taking its instance index into account."""
-    field = location.definition
-    if location.index is None:
+    field = location.definition()
+    if location.instance is None:
         return field.address
-    return field.address + field.stride * (location.index - 1)
+    return field.address + field.stride * (location.instance - 1)
 
 
 def test_every_register_has_a_location() -> None:
@@ -63,7 +63,7 @@ def test_register_layout_matches_legacy_table(name: str) -> None:
     """Address, width and writability survived the move."""
     expected = VECTORS[name]
     location = REGISTER_LOCATIONS[name]
-    field = location.definition
+    field = location.definition()
 
     assert effective_address(location) == expected["address"], "address moved"
     assert field.count == expected["count"], "register width changed"
@@ -85,7 +85,7 @@ def test_register_encodes_as_it_used_to(name: str) -> None:
     The values are rendered with ``repr`` in the fixture, so they are evaluated
     back with the register-value enums in scope.
     """
-    field = REGISTER_LOCATIONS[name].definition
+    field = REGISTER_LOCATIONS[name].definition()
     for rendered, expected in VECTORS[name]["encode_vectors"]:
         value = eval(rendered, {"rv": rv, **vars(rv)})  # noqa: S307
         try:
@@ -100,7 +100,7 @@ def test_register_encodes_as_it_used_to(name: str) -> None:
 def test_register_decodes_as_it_used_to(name: str) -> None:
     """Each register decodes every frozen word pattern to the same value."""
     location = REGISTER_LOCATIONS[name]
-    field = location.definition
+    field = location.definition()
 
     for words, expected in VECTORS[name]["vectors"]:
         try:
