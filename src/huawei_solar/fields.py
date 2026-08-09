@@ -22,6 +22,8 @@ from __future__ import annotations
 import struct
 from collections.abc import Mapping
 from datetime import datetime
+from enum import Enum
+from inspect import isclass
 from typing import TYPE_CHECKING, Any
 
 from modbus_connection.encode import encode_int
@@ -90,6 +92,12 @@ class GainField(NumberField[Any]):
     here and the model layer is left with a scale of 1.
     """
 
+    #: The enum this register's values belong to, when it has one. The model
+    #: layer keeps only the converter it was handed, and this library hands it a
+    #: wrapper (see :func:`_strict`), so the class itself is kept here — a
+    #: consumer building a picker needs to enumerate the members.
+    enum_type: type[Enum] | None = None
+
     def __init__(self, address: int, *, gain: float = 1, **kwargs: Any) -> None:
         """Create a field over a register published with ``gain``."""
         super().__init__(address, **kwargs)
@@ -143,7 +151,7 @@ def number(  # noqa: PLR0913 — one parameter per column of Huawei's register t
     if convert is not None and gain != 1:
         msg = f"register {address}: a converted register cannot also have a gain"
         raise ValueError(msg)
-    return field_class(
+    field = field_class(
         address,
         gain=gain,
         count=count,
@@ -154,6 +162,9 @@ def number(  # noqa: PLR0913 — one parameter per column of Huawei's register t
         writable=writable,
         stride=stride,
     )
+    if isclass(convert) and issubclass(convert, Enum):
+        field.enum_type = convert
+    return field
 
 
 def u16(address: int, **kwargs: Any) -> GainField:

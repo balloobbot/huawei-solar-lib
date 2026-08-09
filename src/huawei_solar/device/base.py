@@ -114,10 +114,14 @@ class HuaweiSolarDevice(ABC):
         unit: ModbusUnit,
         model_name: str,
         *,
+        unit_id: int = 0,
         primary_device: HuaweiSolarDevice | None = None,
     ) -> None:
         """DO NOT USE THIS CONSTRUCTOR DIRECTLY. Use create() method instead."""
         self.unit = unit
+        # A ModbusUnit does not say which unit id it addresses, and consumers key
+        # devices by it, so it is carried alongside the handle.
+        self.unit_id = unit_id
         self.model_name = model_name
         # Sub-devices share the primary device's lock: they share its Modbus
         # link, and the inverter answers one conversation at a time.
@@ -132,10 +136,11 @@ class HuaweiSolarDevice(ABC):
         unit: ModbusUnit,
         *,
         model_name: str,
+        unit_id: int = 0,
         primary_device: HuaweiSolarDevice | None = None,
     ) -> Self:
         """Create instance with the necessary information."""
-        device = cls(unit, model_name, primary_device=primary_device)
+        device = cls(unit, model_name, unit_id=unit_id, primary_device=primary_device)
         await device._populate_additional_fields()
         return device
 
@@ -262,10 +267,11 @@ class HuaweiSolarDeviceWithLogin(HuaweiSolarDevice, ABC):
         unit: ModbusUnit,
         model_name: str,
         *,
+        unit_id: int = 0,
         primary_device: HuaweiSolarDevice | None = None,
     ) -> None:
         """Initialize with per-instance lock and login state."""
-        super().__init__(unit, model_name, primary_device=primary_device)
+        super().__init__(unit, model_name, unit_id=unit_id, primary_device=primary_device)
         self.__login_lock = asyncio.Lock()
         self.__heartbeat_enabled = False
         self.__heartbeat_task: asyncio.Task[None] | None = None

@@ -141,6 +141,7 @@ async def create_device_instance(unit: ModbusUnit, unit_id: int) -> HuaweiSolarD
     return await device_type.create(
         unit,
         model_name=model_name,
+        unit_id=unit_id,
         primary_device=None,  # we are creating the primary device!
     )
 
@@ -156,6 +157,7 @@ async def create_sub_device_instance(
     return await device_type.create(
         sub_unit,
         model_name=model_name,
+        unit_id=unit_id,
         primary_device=primary_device,
     )
 
