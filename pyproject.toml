@@ -32,7 +32,11 @@ classifiers = [
 
 dynamic = ["version"]
 
-dependencies = ["tmodbus[async-serial]>=0.5"]
+dependencies = [
+    "modbus-connection[tmodbus]>=4.3.0",
+    "tenacity>=9.1.4",
+    "tmodbus[async-serial]>=0.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/wlcrs/huawei-solar-lib"
@@ -70,7 +74,17 @@ ignore = [
 pylint.max-args = 6
 
 [tool.ruff.lint.per-file-ignores]
-"src/huawei_solar/register_definitions/periods.py" = ["N801"]
+"src/huawei_solar/periods.py" = ["N801"]
+# ``RegisterField.decode``/``encode`` are typed by modbus-connection: they take
+# and return ``Any``, and are handed a ``scale_exponent`` for the SunSpec-style
+# dynamic scaling no Huawei register uses. Overriding them means repeating that
+# signature, so both rules are silenced here rather than per method.
+"src/huawei_solar/fields.py" = ["ANN401", "ARG002"]
+"tests/**" = ["ANN401"]
+# Field names are the register names Huawei publishes, and are the keys
+# consumers already store; the grid-phase and P_max/S_max spellings keep their
+# datasheet casing rather than being renamed.
+"src/huawei_solar/components/*.py" = ["N815"]
 
 [tool.mypy]
 # Specify the target platform details in config, so your developers are

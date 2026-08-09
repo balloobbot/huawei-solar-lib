@@ -1,7 +1,7 @@
 """Definitions of register values returned by the Huawei inverter."""
 
 from enum import IntEnum
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 
 class GridCode(NamedTuple):
@@ -927,3 +927,20 @@ class SmartLoggerInOperation(IntEnum):
 
     INVALID = 0
     IN_OPERATION = 1
+
+
+def bitfield_decoder[T](definition: dict[int, T], bitfield: int) -> list[Any]:
+    """Decode a bitfield into the list of statuses its set bits stand for.
+
+    An :class:`OnOffBit` entry always contributes a value — which of its two it
+    contributes depends on the bit — while every other entry only appears when
+    its bit is set.
+    """
+    result: list[Any] = []
+    for key, value in definition.items():
+        if isinstance(value, OnOffBit):
+            result.append(value.on_value if key & bitfield else value.off_value)
+        elif key & bitfield:
+            result.append(value)
+
+    return result
