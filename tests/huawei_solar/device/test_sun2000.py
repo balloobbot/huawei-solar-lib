@@ -71,18 +71,57 @@ async def test_an_aliased_register_does_not_split_its_block(
     assert [(event.address, event.count) for event in huawei_unit.read_events] == [(32064, 3)]
 
 
-async def test_restricting_to_one_alias_still_plans_its_read(huawei_unit: MockModbusUnit) -> None:
-    """A component narrowed to an aliased register can still be read.
+@pytest.mark.parametrize(
+    ("component_class", "kept", "dropped", "block"),
+    [
+        (components.Inverter, "grid_voltage", "line_voltage_A_B", (32066, 1)),
+        (components.Inverter, "line_voltage_A_B", "grid_voltage", (32066, 1)),
+        (components.Inverter, "grid_current", "phase_A_current", (32072, 2)),
+        (components.Inverter, "phase_A_current", "grid_current", (32072, 2)),
+        (components.Configuration, "system_time", "system_time_raw", (40000, 2)),
+        (components.Configuration, "system_time_raw", "system_time", (40000, 2)),
+    ],
+)
+async def test_restricting_to_one_alias_still_plans_its_read(
+    huawei_unit: MockModbusUnit,
+    component_class: type,
+    kept: str,
+    dropped: str,
+    block: tuple[int, int],
+) -> None:
+    """A component narrowed to one of two names for the same register still reads it.
 
-    Narrowing marks the dropped alias's address unreadable, which would leave
-    the twin that is still wanted outside every readable range. HuaweiComponent
-    clears the narrowed map, so the planner keeps the register.
+    Huawei names three registers twice, once per inverter variant. Narrowing to
+    one alias must not put the address it still reads out of reach.
     """
-    component = components.Inverter(huawei_unit)
-    component.restrict_fields(["grid_voltage"])
+    component = component_class(huawei_unit)
+    component.restrict_fields([kept])
     await component.async_update()
 
-    assert [(event.address, event.count) for event in huawei_unit.read_events] == [(32066, 1)]
+    assert getattr(component, kept) is not None
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == [block]
+
+
+async def test_pooling_narrowed_components_with_interleaved_registers(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """Registers of two components can interleave without their narrowed maps clashing.
+
+    forcible_charge_discharge_write (Configuration, 47100) sits between two
+    StorageSettings registers, so the map narrowing synthesises for one reaches
+    over the other's address. HuaweiComponent drops that map, so the group pools
+    them into one read instead of refusing the overlap.
+    """
+    await sun2000_device.batch_update(
+        [
+            rn.STORAGE_FORCIBLE_CHARGE_DISCHARGE_WRITE,
+            rn.STORAGE_CHARGE_FROM_GRID_FUNCTION,
+            rn.STORAGE_FORCIBLE_CHARGE_DISCHARGE_SOC,
+        ],
+    )
+
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == [(47087, 15)]
 
 
 async def _refuse_block_while_polling_both(

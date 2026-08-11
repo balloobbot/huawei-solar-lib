@@ -26,12 +26,12 @@ class HuaweiComponent(Component):
     def restrict_fields(self, names: Iterable[str]) -> None:
         """Narrow this component to ``names``, without narrowing its readable map.
 
-        ``restrict_fields`` marks the addresses of the fields it drops as
-        unreadable, to keep a device's declared map honest. Huawei names three
-        registers twice — 32066 is ``grid_voltage`` on a single-phase inverter
-        and ``line_voltage_A_B`` on a three-phase one — so dropping one alias
-        marks the address its twin still reads as unreadable, and the planner
-        refuses a field that no readable range contains.
+        Narrowing synthesises a readable map from the fields that were kept.
+        Huawei interleaves the registers of what this library models as separate
+        components — ``forcible_charge_discharge_write`` at 47100 sits between
+        two ``StorageSettings`` registers — so a synthesised block reaches over
+        addresses a sibling component owns, and a ``ComponentGroup`` pooling both
+        rejects the overlap between their maps.
 
         No Huawei component declares readable ranges, so there is no device map
         to keep honest: clearing what narrowing synthesised leaves the plan
