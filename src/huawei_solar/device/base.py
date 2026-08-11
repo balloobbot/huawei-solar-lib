@@ -62,15 +62,6 @@ class _Poll:
         for (component_class, index), fields in wanted.items():
             component = component_class(unit, index)
             component.restrict_fields(fields)
-            # restrict_fields narrows the component's readable ranges by
-            # *address*, to keep a device's declared map honest. Huawei names
-            # three registers twice — 32066 is grid_voltage on a single-phase
-            # inverter and line_voltage_A_B on a three-phase one — so dropping
-            # one alias marks the address its twin still reads as unreadable,
-            # splitting the block around a register that is being read anyway.
-            # None of these components declare ranges, so dropping them puts
-            # planning back on gaps over exactly the fields that were kept.
-            component.register_ranges = None
             self._components[(component_class, index)] = component
 
         self._group = ComponentGroup(unit, self._components.values())
@@ -80,14 +71,17 @@ class _Poll:
         return set(self.names) == set(names)
 
     def covering(self, address: int, count: int) -> list[str]:
-        """Return the register names a block read at ``address`` was covering."""
+        """Return the register names a block read at ``address`` was covering.
+
+        Where each field landed comes from the component that read it, rather
+        than being worked out again from the declared address and its stride.
+        """
         covered = range(address, address + count)
         found = []
         for name in self.names:
             location = REGISTER_LOCATIONS[name]
-            field = location.definition()
-            start = field.address + field.stride * ((location.instance or 1) - 1)
-            if start in covered or (start + field.count - 1) in covered:
+            resolved = self._components[_instance_key(location)].resolved_fields[location.field]
+            if resolved.address in covered or (resolved.address + resolved.count - 1) in covered:
                 found.append(name)
         return found
 

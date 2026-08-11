@@ -33,7 +33,7 @@ classifiers = [
 dynamic = ["version"]
 
 dependencies = [
-    "modbus-connection[tmodbus]>=4.3.0",
+    "modbus-connection[tmodbus]>=4.4.0",
     "tenacity>=9.1.4",
     "tmodbus[async-serial]>=0.5",
 ]
