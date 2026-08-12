@@ -111,9 +111,9 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
     forcible_charge_discharge_write (Configuration, 47100) sits between two
     StorageSettings registers, so the map narrowing synthesises for one reaches
     over the other's address. A synthesised map is a claim, not a declaration,
-    so the group pools the components instead of refusing the overlap. Each
-    claim's boundaries survive the merge, so the poll reads exactly the three
-    registers asked for rather than bridging over the dropped ones between them.
+    so the group pools the components instead of refusing the overlap. A claim
+    contributes coverage but draws no boundary, so the two adjacent claims at
+    47100 and 47101 share one read, while the hole before them still splits.
     """
     result = await sun2000_device.batch_update(
         [
@@ -126,8 +126,7 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
     assert len(result) == 3
     assert [(event.address, event.count) for event in huawei_unit.read_events] == [
         (47087, 1),
-        (47100, 1),
-        (47101, 1),
+        (47100, 2),
     ]
 
 
