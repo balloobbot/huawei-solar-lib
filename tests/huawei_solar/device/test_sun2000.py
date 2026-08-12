@@ -110,10 +110,12 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
 
     forcible_charge_discharge_write (Configuration, 47100) sits between two
     StorageSettings registers, so the map narrowing synthesises for one reaches
-    over the other's address. HuaweiComponent drops that map, so the group pools
-    them into one read instead of refusing the overlap.
+    over the other's address. A synthesised map is a claim, not a declaration,
+    so the group pools the components instead of refusing the overlap. Each
+    claim's boundaries survive the merge, so the poll reads exactly the three
+    registers asked for rather than bridging over the dropped ones between them.
     """
-    await sun2000_device.batch_update(
+    result = await sun2000_device.batch_update(
         [
             rn.STORAGE_FORCIBLE_CHARGE_DISCHARGE_WRITE,
             rn.STORAGE_CHARGE_FROM_GRID_FUNCTION,
@@ -121,7 +123,12 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
         ],
     )
 
-    assert [(event.address, event.count) for event in huawei_unit.read_events] == [(47087, 15)]
+    assert len(result) == 3
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == [
+        (47087, 1),
+        (47100, 1),
+        (47101, 1),
+    ]
 
 
 async def _refuse_block_while_polling_both(
