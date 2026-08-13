@@ -295,8 +295,17 @@ class HuaweiSolarDevice(ABC):
         return (await self.batch_update([name]))[name]
 
     async def get_multiple(self, names: list[str]) -> dict[str, Any]:
-        """Get the values of several registers."""
-        return await self.batch_update(names)
+        """Get the values of several registers.
+
+        All of them: asking for a value and being handed a dict that does not
+        have it is worse than being told why. A poll, which has other registers
+        to get on with, is the one that tolerates a partial answer.
+        """
+        report = await self.batch_update_report(names)
+        if not report.complete:
+            with session.translating("read registers"):
+                raise next(iter(report.failed.values()))
+        return report.values
 
     # -- writing -------------------------------------------------------------
 

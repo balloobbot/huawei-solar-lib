@@ -102,6 +102,20 @@ async def test_reading_one_register_still_raises(
         await sun2000_device.get(rn.INPUT_POWER)
 
 
+async def test_reading_several_registers_raises_rather_than_answering_partly(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """get_multiple() is asked for values, not for a poll: a missing one is an error.
+
+    Setup reads its identity this way, across two components.
+    """
+    huawei_unit.fail_read(INVERTER_BLOCK, IllegalDataAddressError())
+
+    with pytest.raises(ReadException):
+        await sun2000_device.get_multiple([rn.INPUT_POWER, rn.MODEL_NAME])
+
+
 async def test_every_component_refreshes_on_a_healthy_device(
     sun2000_device: SUN2000Device,
 ) -> None:
