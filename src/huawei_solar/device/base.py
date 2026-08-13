@@ -5,21 +5,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
-from modbus_connection import ModbusConnectionError, ModbusError
+from modbus_connection import ExceptionCode, ModbusConnectionError, ModbusError
 
 from huawei_solar import session
 from huawei_solar.exceptions import (
     InvalidCredentials,
     PermissionDeniedError,
+    ReadException,
     WriteException,
 )
 from huawei_solar.registry import REGISTER_LOCATIONS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from modbus_connection import ModbusUnit
 
@@ -33,6 +35,27 @@ HEARTBEAT_INTERVAL = 15
 #: Written back with the value it already holds, to find out whether this
 #: connection is allowed to write at all.
 WRITE_TEST_REGISTER = "time_zone"
+
+#: Different firmwares answer with one or the other for the same "this register
+#: is not here" condition, so probing has to treat both as "the device says no".
+ABSENT_CODES = {ExceptionCode.ILLEGAL_DATA_VALUE, ExceptionCode.ILLEGAL_DATA_ADDRESS}
+
+
+@contextmanager
+def suppress_absent_register(what: str) -> Iterator[None]:
+    """Swallow the device saying "no such register", but nothing else.
+
+    A probe for an optional sub-system may only conclude "absent" from the
+    device refusing the address. Anything else — busy, garbled, timed out —
+    propagates, so setup fails and runs again later instead of latching the
+    sub-system away for the lifetime of this device object.
+    """
+    try:
+        yield
+    except ReadException as err:
+        if err.modbus_exception_code not in ABSENT_CODES:
+            raise
+        _LOGGER.debug("%s is not available on this device", what)
 
 
 @dataclass(frozen=True)

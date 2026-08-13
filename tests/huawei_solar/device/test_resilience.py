@@ -15,6 +15,7 @@ from modbus_connection import (
     IllegalDataAddressError,
     ModbusConnectionError,
     ModbusTimeoutError,
+    ServerDeviceBusyError,
 )
 from modbus_connection.mock import MockModbusUnit
 
@@ -24,6 +25,7 @@ from huawei_solar.device import SUN2000Device
 INVERTER_BLOCK = 32064  # input_power
 METER_BLOCK = 37132  # active_grid_A_power
 METER_STATUS_BLOCK = 37100  # meter_status, read to decide whether to poll the meter
+OPTIMIZER_COUNT_BLOCK = 37200  # nb_optimizers, probed once during setup
 
 
 async def test_a_failed_component_leaves_the_rest_fresh(
@@ -121,3 +123,23 @@ async def test_a_failed_meter_status_probe_does_not_take_the_poll_down(
     result = await sun2000_device.batch_update([rn.INPUT_POWER, rn.ACTIVE_GRID_A_POWER])
 
     assert result == {rn.INPUT_POWER: 0}
+
+
+async def test_a_refused_setup_probe_leaves_the_sub_system_absent(huawei_unit: MockModbusUnit) -> None:
+    huawei_unit.fail_read(OPTIMIZER_COUNT_BLOCK, IllegalDataAddressError())
+
+    device = await SUN2000Device.create(huawei_unit, model_name="SUN2000-9KTL-123")
+
+    assert device.has_optimizers is False
+
+
+async def test_a_transient_setup_failure_is_not_taken_for_absence(huawei_unit: MockModbusUnit) -> None:
+    """A busy device must not have its optimizers written off until it is reloaded.
+
+    Setup fails instead, leaving no device object to carry the wrong answer, so
+    the caller sets up again later.
+    """
+    huawei_unit.fail_read(OPTIMIZER_COUNT_BLOCK, ServerDeviceBusyError())
+
+    with pytest.raises(ReadException):
+        await SUN2000Device.create(huawei_unit, model_name="SUN2000-9KTL-123")

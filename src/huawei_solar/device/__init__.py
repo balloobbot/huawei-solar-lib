@@ -5,12 +5,10 @@ from __future__ import annotations
 from logging import getLogger
 from typing import TYPE_CHECKING, Any
 
-from modbus_connection import ExceptionCode
-
 from huawei_solar import register_names as rn
 from huawei_solar.exceptions import DeviceDetectionError, ReadException
 
-from .base import HuaweiSolarDevice, HuaweiSolarDeviceWithLogin, UpdateReport
+from .base import ABSENT_CODES, HuaweiSolarDevice, HuaweiSolarDeviceWithLogin, UpdateReport
 from .emma import EMMADevice
 from .meter import MeterDevice
 from .scharger import SChargerDevice
@@ -24,10 +22,6 @@ if TYPE_CHECKING:
 _LOGGER = getLogger(__name__)
 
 DEFAULT_SDONGLE_UNIT_ID = 100
-
-# Different firmwares answer with one or the other for the same "this register
-# is not here" condition, so probing has to treat both as "try the next probe".
-_ABSENT_CODES = {ExceptionCode.ILLEGAL_DATA_VALUE, ExceptionCode.ILLEGAL_DATA_ADDRESS}
 
 
 class _Probe(HuaweiSolarDevice):
@@ -50,7 +44,7 @@ async def _try_read_register(unit: ModbusUnit, register: str) -> Any | None:  # 
     try:
         return await _Probe(unit, "probe").get(register)
     except ReadException as err:
-        if err.modbus_exception_code in _ABSENT_CODES:
+        if err.modbus_exception_code in ABSENT_CODES:
             return None
 
         # re-raise any other exception that occurred

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,7 +21,7 @@ from huawei_solar.files import (
 )
 from huawei_solar.registry import REGISTER_LOCATIONS
 
-from .base import HuaweiSolarDeviceWithLogin
+from .base import HuaweiSolarDeviceWithLogin, suppress_absent_register
 from .emma import EMMADevice
 from .smartlogger import SmartLoggerDevice
 
@@ -85,13 +84,13 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
         self._pv_registers = _compute_pv_registers(self.pv_string_count)
 
         # some inverters throw an IllegalAddress exception when accessing this address
-        with suppress(ReadException):
+        with suppress_absent_register("The optimizer count"):
             self.has_optimizers = await self.get(rn.NB_OPTIMIZERS)
 
-        with suppress(ReadException):
+        with suppress_absent_register("A first battery"):
             self.battery_1_type = await self.get(rn.STORAGE_UNIT_1_PRODUCT_MODEL)
 
-        with suppress(ReadException):
+        with suppress_absent_register("A second battery"):
             self.battery_2_type = await self.get(rn.STORAGE_UNIT_2_PRODUCT_MODEL)
 
         if (
@@ -104,14 +103,12 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
         if self.battery_type != rv.StorageProductModel.NONE and (
             self.primary_device is None or not isinstance(self.primary_device, (EMMADevice, SmartLoggerDevice))
         ):
-            try:
+            self.supports_capacity_control = False
+            with suppress_absent_register("Storage capacity control"):
                 await self.get(rn.STORAGE_CAPACITY_CONTROL_MODE)
                 self.supports_capacity_control = True
-            except ReadException:
-                _LOGGER.debug("Storage capacity control is not supported by this device")
-                self.supports_capacity_control = False
 
-        with suppress(ReadException):
+        with suppress_absent_register("The power meter status"):
             self.power_meter_online = await self.get(rn.METER_STATUS) == rv.MeterStatus.NORMAL
 
         # Caveat: if the inverter is in offline mode, and the power meter is thus offline,
@@ -120,9 +117,9 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
             self.power_meter_type = await self.get(rn.METER_TYPE)
 
         # reading these registers fails on some firmware versions (cfr. https://github.com/wlcrs/huawei_solar/issues/1264)
-        with suppress(ReadException):
+        with suppress_absent_register("The daylight saving time flag"):
             self._dst = await self.get(rn.DAYLIGHT_SAVING_TIME)
-        with suppress(ReadException):
+        with suppress_absent_register("The time zone"):
             self._time_zone = await self.get(rn.TIME_ZONE)
 
     def _handle_batch_read_error(
