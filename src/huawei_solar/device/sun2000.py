@@ -7,6 +7,8 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from modbus_connection import ModbusError
+
 from huawei_solar import register_names as rn
 from huawei_solar import register_values as rv
 from huawei_solar.components import sun2000 as components
@@ -126,9 +128,9 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
     def _handle_batch_read_error(
         self,
         queried_register_names: list[str],
-        exc: HuaweiSolarException,
+        exc: ModbusError,
     ) -> None:
-        """Handle read errors in batch_update."""
+        """Note that one component of a batch update failed to read."""
         if any(regname in METER_REGISTERS for regname in queried_register_names):
             _LOGGER.info(
                 "Fetching power meter registers failed. "
@@ -137,8 +139,6 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
                 exc_info=exc,
             )
             self.power_meter_online = False
-
-        raise exc
 
     def _detect_state_changes(self, new_values: dict[str, Any]) -> None:
         """Update state based on result of batch_update query.
@@ -188,7 +188,13 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
         """Read METER_STATUS on its own, without going back through the filter."""
         component = components.PowerMeter(self.unit)
         component.restrict_fields([REGISTER_LOCATIONS[rn.METER_STATUS].field])
-        await component.async_update()
+        try:
+            await component.async_update()
+        except ModbusError:
+            # This probe runs ahead of the poll it shapes, so a failure here must
+            # not take that poll down: it only means "not online this time".
+            _LOGGER.debug("Could not read the power meter status", exc_info=True)
+            return False
         return bool(component.meter_status)
 
     def _transform_register_values(self, register_name: str, value: Any) -> Any:  # noqa: ANN401

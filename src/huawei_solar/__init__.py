@@ -18,6 +18,7 @@ from .device import (
     SDongleDevice,
     SmartLoggerDevice,
     SUN2000Device,
+    UpdateReport,
     create_device_instance,
     create_sub_device_instance,
 )
@@ -89,6 +90,7 @@ __all__ = [
     "SmartLoggerDevice",
     "SupportsHuaweiPdu",
     "TimeOfUsePeriodsException",
+    "UpdateReport",
     "WriteException",
     "create_device_instance",
     "create_rtu_connection",

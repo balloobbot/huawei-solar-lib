@@ -81,6 +81,22 @@ This results in the following output being printed:
 {'input_power': Result(value=82, unit='W'), 'line_voltage_A_B': Result(value=233.4, unit='V'), 'line_voltage_B_C': Result(value=0.0, unit='V'), 'line_voltage_C_A': Result(value=0.0, unit='V')}
 ```
 
+### Partial updates
+
+A batch update reads its registers component by component, so one refused or
+slow block does not take the rest of the update with it: the registers of the
+component that failed are simply absent from the result, while every other
+component still refreshes. Only a device that answered nothing at all raises.
+
+`batch_update_report()` returns the same values along with what happened, so a
+caller can log which components kept quiet and why:
+
+```py
+report = await device.batch_update_report(register_names)
+for component, error in report.failed.items():
+    print(f"{component} did not answer: {error}")
+```
+
 ## Frequently asked questions
 
 **Q:** the connection is interrupted a few seconds after connecting to the Huawei Device. How do I solve this?

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import huawei_solar.register_names as rn
 import pytest
 from huawei_solar.components import sun2000 as components
-from huawei_solar.exceptions import ReadException
 from huawei_solar.registry import REGISTER_LOCATIONS
 from modbus_connection import IllegalDataAddressError
 from modbus_connection.mock import MockModbusUnit
@@ -110,10 +111,13 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
 
     forcible_charge_discharge_write (Configuration, 47100) sits between two
     StorageSettings registers, so the map narrowing synthesises for one reaches
-    over the other's address. A synthesised map is a claim, not a declaration,
-    so the group pools the components instead of refusing the overlap. A claim
-    contributes coverage but draws no boundary, so the two adjacent claims at
-    47100 and 47101 share one read, while the hole before them still splits.
+    over the other's address. Each component is read on its own, so that overlap
+    never has to be resolved into a shared plan: StorageSettings reads its two
+    registers - low address first, and separately, because its declared map draws
+    a boundary between them - and Configuration then reads the one in between.
+
+    That is one request more than the pooled read this used to be, which is what
+    containing a failure to a single component costs here.
     """
     result = await sun2000_device.batch_update(
         [
@@ -126,7 +130,8 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
     assert len(result) == 3
     assert [(event.address, event.count) for event in huawei_unit.read_events] == [
         (47087, 1),
-        (47100, 2),
+        (47101, 1),
+        (47100, 1),
     ]
 
 
@@ -134,34 +139,35 @@ async def _refuse_block_while_polling_both(
     device: SUN2000Device,
     unit: MockModbusUnit,
     refused_block: int,
-) -> None:
+) -> dict[str, Any]:
     """Poll an inverter and a power-meter register with one of the blocks refused."""
     device.power_meter_online = True
     unit.fail_read(refused_block, IllegalDataAddressError())
 
-    with pytest.raises(ReadException):
-        await device.batch_update([rn.INPUT_POWER, rn.ACTIVE_GRID_A_POWER])
+    return await device.batch_update([rn.INPUT_POWER, rn.ACTIVE_GRID_A_POWER])
 
 
 async def test_a_refused_meter_block_marks_the_meter_offline(
     sun2000_device: SUN2000Device,
     huawei_unit: MockModbusUnit,
 ) -> None:
-    """The refused block names the power-meter register, so the meter is blamed."""
-    await _refuse_block_while_polling_both(sun2000_device, huawei_unit, 37132)
+    """The refused block belongs to the power meter, so the meter is blamed."""
+    result = await _refuse_block_while_polling_both(sun2000_device, huawei_unit, 37132)
 
     assert sun2000_device.power_meter_online is False
+    assert result == {rn.INPUT_POWER: 0}
 
 
 async def test_a_refused_inverter_block_leaves_the_meter_alone(
     sun2000_device: SUN2000Device,
     huawei_unit: MockModbusUnit,
 ) -> None:
-    """The refused block covered only the inverter register, so the meter is not blamed.
+    """The refused block belongs to the inverter, so the meter is not blamed.
 
-    The two registers are read as separate blocks, and a refusal names the
-    block it was refused, so the poll's other registers keep their standing.
+    Each component is read on its own, so a refusal is attributed to the one
+    that was refused and the poll's other registers keep their standing.
     """
-    await _refuse_block_while_polling_both(sun2000_device, huawei_unit, 32064)
+    result = await _refuse_block_while_polling_both(sun2000_device, huawei_unit, 32064)
 
     assert sun2000_device.power_meter_online is True
+    assert result == {rn.ACTIVE_GRID_A_POWER: 0}

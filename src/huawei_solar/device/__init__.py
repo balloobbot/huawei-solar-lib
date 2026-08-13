@@ -10,7 +10,7 @@ from modbus_connection import ExceptionCode
 from huawei_solar import register_names as rn
 from huawei_solar.exceptions import DeviceDetectionError, ReadException
 
-from .base import HuaweiSolarDevice, HuaweiSolarDeviceWithLogin
+from .base import HuaweiSolarDevice, HuaweiSolarDeviceWithLogin, UpdateReport
 from .emma import EMMADevice
 from .meter import MeterDevice
 from .scharger import SChargerDevice
@@ -171,6 +171,7 @@ __all__ = [
     "SDongleDevice",
     "SUN2000Device",
     "SmartLoggerDevice",
+    "UpdateReport",
     "create_device_instance",
     "create_sub_device_instance",
     "detect_device_type",

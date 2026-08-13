@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Self
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
-from modbus_connection import ModbusExceptionError
-from modbus_connection.model import ComponentGroup
+from modbus_connection import ModbusConnectionError, ModbusError
 
 from huawei_solar import session
 from huawei_solar.exceptions import (
-    HuaweiSolarException,
     InvalidCredentials,
     PermissionDeniedError,
     WriteException,
@@ -36,13 +35,64 @@ HEARTBEAT_INTERVAL = 15
 WRITE_TEST_REGISTER = "time_zone"
 
 
+@dataclass(frozen=True)
+class UpdateReport:
+    """What one batch update read, by component.
+
+    A component whose read failed contributes nothing: its registers are absent
+    from ``values`` and the error that failed it is listed under the component's
+    name, while every other component still refreshed. A device that answered
+    nothing at all is never reported — the update raises instead, because that
+    is indistinguishable from a device that is gone.
+
+    The errors are ``modbus_connection``'s own: they are handed on as they were
+    raised rather than translated, so a caller can tell a refusal from a timeout
+    without parsing a message.
+    """
+
+    values: dict[str, Any]
+    updated: set[str]
+    failed: dict[str, ModbusError]
+
+    @property
+    def complete(self) -> bool:
+        """Whether every component in the poll refreshed."""
+        return not self.failed
+
+
 def _instance_key(location: RegisterLocation) -> tuple[type[HuaweiComponent], int]:
     """Return the component instance a register lives on: its class and its index."""
     return (location.component, location.instance or 1)
 
 
+def _component_name(location: RegisterLocation) -> str:
+    """Return the name a poll reports the component instance under."""
+    if location.instance is None:
+        return location.component.__name__
+    return f"{location.component.__name__}[{location.instance}]"
+
+
+class _PollUnit(NamedTuple):
+    """One component instance and the registers it answers for.
+
+    The unit a poll is contained at: it either refreshes whole or fails whole,
+    because a component reads all of its blocks or none of them.
+    """
+
+    component: HuaweiComponent
+    names: list[str]
+
+    def first_address(self) -> int:
+        """Return the lowest address this unit reads."""
+        return min(self.component.resolved_fields[REGISTER_LOCATIONS[name].field].address for name in self.names)
+
+    def values(self) -> dict[str, Any]:
+        """Return the values this unit just read, by register name."""
+        return {name: getattr(self.component, REGISTER_LOCATIONS[name].field) for name in self.names}
+
+
 class _Poll:
-    """One shaped read: the components covering a set of registers, pooled.
+    """One shaped read: the components covering a set of registers.
 
     A component is narrowed to the fields the caller asked for, so a Home
     Assistant install with half its entities disabled does not read the other
@@ -51,48 +101,30 @@ class _Poll:
     """
 
     def __init__(self, unit: ModbusUnit, names: Iterable[str]) -> None:
-        """Build the components covering ``names`` and pool them into one group."""
+        """Build the components covering ``names``, one poll unit each."""
         self.names = list(names)
-        wanted: dict[tuple[type[HuaweiComponent], int], set[str]] = {}
+        wanted: dict[str, list[str]] = {}
+        keys: dict[str, tuple[type[HuaweiComponent], int]] = {}
         for name in self.names:
             location = REGISTER_LOCATIONS[name]
-            wanted.setdefault(_instance_key(location), set()).add(location.field)
+            component_name = _component_name(location)
+            keys[component_name] = _instance_key(location)
+            wanted.setdefault(component_name, []).append(name)
 
-        self._components: dict[tuple[type[HuaweiComponent], int], HuaweiComponent] = {}
-        for (component_class, index), fields in wanted.items():
+        units: dict[str, _PollUnit] = {}
+        for component_name, register_names in wanted.items():
+            component_class, index = keys[component_name]
             component = component_class(unit, index)
-            component.restrict_fields(fields)
-            self._components[(component_class, index)] = component
+            component.restrict_fields({REGISTER_LOCATIONS[name].field for name in register_names})
+            units[component_name] = _PollUnit(component, register_names)
 
-        self._group = ComponentGroup(unit, self._components.values())
+        # Read low addresses first, so the requests do not come out in whichever
+        # order the caller happened to list its registers.
+        self.units = dict(sorted(units.items(), key=lambda item: item[1].first_address()))
 
     def matches(self, names: Iterable[str]) -> bool:
         """Whether this poll already covers exactly ``names``."""
         return set(self.names) == set(names)
-
-    def covering(self, address: int, count: int) -> list[str]:
-        """Return the register names a block read at ``address`` was covering.
-
-        Where each field landed comes from the component that read it, rather
-        than being worked out again from the declared address and its stride.
-        """
-        covered = range(address, address + count)
-        found = []
-        for name in self.names:
-            location = REGISTER_LOCATIONS[name]
-            resolved = self._components[_instance_key(location)].resolved_fields[location.field]
-            if resolved.address in covered or (resolved.address + resolved.count - 1) in covered:
-                found.append(name)
-        return found
-
-    async def read(self) -> dict[str, Any]:
-        """Read every component in one pooled pass and return the values by name."""
-        await self._group.async_update()
-        values = {}
-        for name in self.names:
-            location = REGISTER_LOCATIONS[name]
-            values[name] = getattr(self._components[_instance_key(location)], location.field)
-        return values
 
 
 class HuaweiSolarDevice(ABC):
@@ -149,13 +181,17 @@ class HuaweiSolarDevice(ABC):
 
     # -- reading -------------------------------------------------------------
 
-    def _handle_batch_read_error(
+    def _handle_batch_read_error(  # noqa: B027
         self,
         _queried_register_names: list[str],
-        exc: HuaweiSolarException,
+        _exc: ModbusError,
     ) -> None:
-        """Handle read errors in batch_update."""
-        raise exc
+        """Note that one component of a batch update failed to read.
+
+        The failure is already contained by the time this is called — the rest
+        of the poll still runs — so an implementation records what it learns
+        from it and returns.
+        """
 
     def _detect_state_changes(self, new_values: dict[str, Any]) -> None:  # noqa: B027
         """Update state based on the result of a batch_update query.
@@ -175,7 +211,20 @@ class HuaweiSolarDevice(ABC):
         return value
 
     async def batch_update(self, register_names: list[str]) -> dict[str, Any]:
-        """Read every register in ``register_names`` in as few requests as the device allows."""
+        """Read every register in ``register_names`` in as few requests as the device allows.
+
+        Registers whose component failed to read are absent from the result.
+        Use :meth:`batch_update_report` to learn which those were, and why.
+        """
+        return (await self.batch_update_report(register_names)).values
+
+    async def batch_update_report(self, register_names: list[str]) -> UpdateReport:
+        """Read every register in ``register_names``, one component at a time.
+
+        A component that fails to read does not take the rest of the poll with
+        it: its registers stay out of the result while every other component
+        still refreshes. Only a device that answered nothing at all raises.
+        """
         if unknown := [name for name in register_names if name not in REGISTER_LOCATIONS]:
             _LOGGER.warning("Unknown register name passed to batch_update: %s", ", ".join(unknown))
             register_names = [name for name in register_names if name in REGISTER_LOCATIONS]
@@ -188,26 +237,35 @@ class HuaweiSolarDevice(ABC):
 
             _LOGGER.debug("Batch update of the following registers: %s", ", ".join(wanted))
 
-            try:
+            values: dict[str, Any] = {}
+            updated: set[str] = set()
+            failed: dict[str, ModbusError] = {}
+            for name, poll_unit in self._poll.units.items():
+                try:
+                    await poll_unit.component.async_update()
+                except ModbusConnectionError:
+                    with session.translating("read registers"):
+                        raise
+                except ModbusError as err:
+                    failed[name] = err
+                    self._handle_batch_read_error(poll_unit.names, err)
+                else:
+                    updated.add(name)
+                    values.update(poll_unit.values())
+
+            if failed and not updated:
+                # Nothing came back at all. There is no partial result to report,
+                # and the caller cannot tell this apart from a device that is
+                # gone, so it goes out the way a failed read always did.
                 with session.translating("read registers"):
-                    values = await self._poll.read()
-            except HuaweiSolarException as exc:
-                self._handle_batch_read_error(self._failed_registers(exc, wanted), exc)
-                values = {}
+                    raise next(iter(failed.values()))
 
             self._detect_state_changes(values)
-            return {name: self._transform_register_values(name, value) for name, value in values.items()}
-
-    def _failed_registers(self, exc: Exception, fallback: list[str]) -> list[str]:
-        """Which registers a failed read was after.
-
-        A refused block read names the block it was refused, so the registers it
-        was covering can be recovered; anything else took the whole poll down.
-        """
-        cause = exc.__cause__
-        if isinstance(cause, ModbusExceptionError) and cause.block is not None and self._poll is not None:
-            return self._poll.covering(cause.block.address, cause.block.count)
-        return fallback
+            return UpdateReport(
+                {name: self._transform_register_values(name, value) for name, value in values.items()},
+                updated,
+                failed,
+            )
 
     async def get(self, name: str) -> Any:  # noqa: ANN401
         """Get the value of a certain register."""
