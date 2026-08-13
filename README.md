@@ -97,6 +97,22 @@ for component, error in report.failed.items():
     print(f"{component} did not answer: {error}")
 ```
 
+### The raw register map
+
+`async_read_raw()` re-reads every register the device has read — the polled ones
+and the identity registers read once while setting it up — and returns them
+undecoded, keyed by address space and absolute address. That is what to attach
+to an issue report.
+
+```py
+raw = await device.async_read_raw()
+print(raw["holding"][30015])  # the first word of the serial number, as it reads
+```
+
+A component that will not answer is left out rather than failing the dump: a
+device that is misbehaving is exactly when the dump is worth having. Only a
+dropped link raises.
+
 ## Frequently asked questions
 
 **Q:** the connection is interrupted a few seconds after connecting to the Huawei Device. How do I solve this?

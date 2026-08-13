@@ -178,6 +178,10 @@ class HuaweiSolarDevice(ABC):
         self.primary_device = primary_device
         self._poll: _Poll | None = None
         self._writable: dict[tuple[type[HuaweiComponent], int], HuaweiComponent] = {}
+        # Every register this device has actually read, poll or setup probe.
+        # A raw dump is built from it, so the identity registers read once at
+        # setup are in it as well.
+        self._read_registers: set[str] = set()
 
     @classmethod
     async def create(
@@ -275,6 +279,7 @@ class HuaweiSolarDevice(ABC):
                 else:
                     updated.add(name)
                     values.update(poll_unit.values())
+                    self._read_registers.update(poll_unit.names)
 
             if failed and not updated:
                 # Nothing came back at all. There is no partial result to report,
@@ -289,6 +294,38 @@ class HuaweiSolarDevice(ABC):
                 updated,
                 failed,
             )
+
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Read every register this device reads, undecoded, keyed by space and address.
+
+        For diagnostics: it is what an issue report needs attached, and what the
+        mock backend replays. That includes the identity registers read once at
+        setup — no poll goes back to them, so walking the last poll alone would
+        drop exactly the registers that identify the device.
+
+        A component that will not answer is left out instead of failing the
+        dump: a device that is misbehaving is when the dump is worth having.
+        Only a dropped link raises.
+        """
+        async with self.update_lock:
+            # Through the same filter a poll goes through: reading the power
+            # meter while it is offline makes the inverter close the connection.
+            names = await self._filter_registers(sorted(self._read_registers))
+            raw: dict[str, dict[int, int | bool]] = {}
+            # Components of their own, so a dump does not hand the poll's
+            # components new values behind its back.
+            for name, poll_unit in _Poll(self.unit, names).units.items():
+                try:
+                    read = await poll_unit.component.async_read_raw()
+                except ModbusConnectionError:
+                    with session.translating("read registers"):
+                        raise
+                except ModbusError as err:
+                    _LOGGER.debug("%s is not in the raw dump: %s", name, err)
+                    continue
+                for space, values in read.items():
+                    raw.setdefault(space, {}).update(values)
+            return raw
 
     async def get(self, name: str) -> Any:  # noqa: ANN401
         """Get the value of a certain register."""
