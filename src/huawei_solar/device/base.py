@@ -316,7 +316,7 @@ class HuaweiSolarDevice(ABC):
             # components new values behind its back.
             for name, poll_unit in _Poll(self.unit, names).units.items():
                 try:
-                    read = await poll_unit.component.async_read_raw()
+                    read = await poll_unit.component.async_read_raw(notify=False)
                 except ModbusConnectionError:
                     with session.translating("read registers"):
                         raise
