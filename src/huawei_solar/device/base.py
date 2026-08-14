@@ -9,7 +9,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Self
 
-from modbus_connection import ExceptionCode, ModbusConnectionError, ModbusError
+from modbus_connection import (
+    ExceptionCode,
+    ModbusConnectionError,
+    ModbusError,
+    ModbusTimeoutError,
+)
 
 from huawei_solar import session
 from huawei_solar.exceptions import (
@@ -273,6 +278,14 @@ class HuaweiSolarDevice(ABC):
                 except ModbusConnectionError:
                     with session.translating("read registers"):
                         raise
+                except ModbusTimeoutError as err:
+                    if not updated and not failed:
+                        # Nothing has answered yet, not even a refusal: the device
+                        # is silent, and walking the rest costs a timeout each.
+                        with session.translating("read registers"):
+                            raise
+                    failed[name] = err
+                    self._handle_batch_read_error(poll_unit.names, err)
                 except ModbusError as err:
                     failed[name] = err
                     self._handle_batch_read_error(poll_unit.names, err)

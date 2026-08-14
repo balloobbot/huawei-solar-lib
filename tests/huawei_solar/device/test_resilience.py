@@ -88,6 +88,39 @@ async def test_a_device_that_answers_nothing_raises(
         await sun2000_device.batch_update([rn.INPUT_POWER, rn.NB_PV_STRINGS])
 
 
+async def test_a_timeout_before_anything_answered_stops_the_poll(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """A silent device is found on the first component, not paid for on every one.
+
+    Nothing has answered yet - not even a refusal, which would prove the device
+    is there - so the components behind it would only wait out a timeout each.
+    """
+    sun2000_device.power_meter_online = True
+    huawei_unit.fail_read(INVERTER_BLOCK, ModbusTimeoutError("no answer"))
+    huawei_unit.read_events.clear()
+
+    with pytest.raises(TimeoutError):
+        await sun2000_device.batch_update([rn.INPUT_POWER, rn.ACTIVE_GRID_A_POWER])
+
+    assert all(event.address != METER_BLOCK for event in huawei_unit.read_events)
+
+
+async def test_a_refusal_before_anything_answered_is_still_contained(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """The device refusing an address proves it is there, so the poll goes on."""
+    sun2000_device.power_meter_online = True
+    huawei_unit.fail_read(INVERTER_BLOCK, IllegalDataAddressError())
+
+    report = await sun2000_device.batch_update_report([rn.INPUT_POWER, rn.ACTIVE_GRID_A_POWER])
+
+    assert set(report.failed) == {"Inverter"}
+    assert report.updated == {"PowerMeter"}
+
+
 async def test_reading_one_register_still_raises(
     sun2000_device: SUN2000Device,
     huawei_unit: MockModbusUnit,

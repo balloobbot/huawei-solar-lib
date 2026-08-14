@@ -86,7 +86,9 @@ This results in the following output being printed:
 A batch update reads its registers component by component, so one refused or
 slow block does not take the rest of the update with it: the registers of the
 component that failed are simply absent from the result, while every other
-component still refreshes. Only a device that answered nothing at all raises.
+component still refreshes. Only a device that answered nothing at all raises —
+which includes a first block that times out, because the components behind it
+would only wait out a timeout each.
 
 `batch_update_report()` returns the same values along with what happened, so a
 caller can log which components kept quiet and why:
