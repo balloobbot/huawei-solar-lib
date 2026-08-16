@@ -107,6 +107,26 @@ async def test_a_timeout_before_anything_answered_stops_the_poll(
     assert all(event.address != METER_BLOCK for event in huawei_unit.read_events)
 
 
+async def test_a_settings_poll_stops_at_the_first_timeout_of_its_own(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """A settings poll is its own poll, so "nothing has answered" is about it alone.
+
+    It does not get to lean on a readings poll that answered earlier: the device
+    is silent now, and the components behind the first one would only wait out a
+    timeout each.
+    """
+    await sun2000_device.batch_update_readings([rn.INPUT_POWER])
+    huawei_unit.fail_requests(ModbusTimeoutError("no answer"))
+    huawei_unit.read_events.clear()
+
+    with pytest.raises(TimeoutError):
+        await sun2000_device.batch_update_settings([rn.TIME_ZONE, rn.STORAGE_MAXIMUM_CHARGING_POWER])
+
+    assert len(huawei_unit.read_events) == 1
+
+
 async def test_a_refusal_before_anything_answered_is_still_contained(
     sun2000_device: SUN2000Device,
     huawei_unit: MockModbusUnit,

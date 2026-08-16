@@ -51,10 +51,11 @@ from .periods import (
     PeakSettingPeriod,
 )
 from .register_names import RegisterName
-from .registry import REGISTER_LOCATIONS, RegisterLocation
+from .registry import REGISTER_LOCATIONS, SETTING_REGISTERS, RegisterLocation
 
 __all__ = [
     "REGISTER_LOCATIONS",
+    "SETTING_REGISTERS",
     "ChargeDischargePeriod",
     "ChargeFlag",
     "ConnectionException",

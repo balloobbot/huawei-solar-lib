@@ -1243,3 +1243,19 @@ REGISTER_LOCATIONS: dict[str, RegisterLocation] = {
     "yield_this_month": RegisterLocation(emma.Emma, "yield_this_month", None),
     "yield_this_year": RegisterLocation(emma.Emma, "yield_this_year", None),
 }
+
+SETTING_REGISTERS: frozenset[str] = frozenset(
+    name for name, location in REGISTER_LOCATIONS.items() if location.definition().writable
+)
+"""The registers that hold what the device was told, not what it measures.
+
+Read from the register map rather than kept by hand: a register something can
+write is a register that only changes when something writes it, which is what
+makes it worth polling on a slower schedule than the measurements — and worth
+reading back straight after a write.
+
+Registers a device configures but refuses to have written — the grid code, the
+LCOE, the rated limits — stay on the measured side. That polls them more often
+than they change, which is what happens today; the alternative is a list
+maintained apart from the register map, which would drift.
+"""

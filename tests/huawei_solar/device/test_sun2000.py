@@ -7,7 +7,7 @@ from typing import Any
 import huawei_solar.register_names as rn
 import pytest
 from huawei_solar.components import sun2000 as components
-from huawei_solar.registry import REGISTER_LOCATIONS
+from huawei_solar.registry import REGISTER_LOCATIONS, SETTING_REGISTERS
 from modbus_connection import IllegalDataAddressError
 from modbus_connection.mock import MockModbusUnit
 
@@ -133,6 +133,66 @@ async def test_pooling_narrowed_components_with_interleaved_registers(
         (47101, 1),
         (47100, 1),
     ]
+
+
+# A poll mixing what the inverter measures with what it has been told, and the
+# blocks each half of it is read in.
+_MIXED_POLL: list[str] = [
+    rn.INPUT_POWER,
+    rn.DEVICE_STATUS,
+    rn.TIME_ZONE,
+    rn.STORAGE_MAXIMUM_CHARGING_POWER,
+]
+_READING_BLOCKS = [(32064, 2), (32089, 1)]
+_SETTING_BLOCKS = [(43006, 1), (47075, 2)]
+
+
+async def test_readings_and_settings_read_their_own_half(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """Neither method reads a register the other one owns."""
+    readings = await sun2000_device.batch_update_readings(_MIXED_POLL)
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == _READING_BLOCKS
+
+    huawei_unit.read_events.clear()
+    settings = await sun2000_device.batch_update_settings(_MIXED_POLL)
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == _SETTING_BLOCKS
+
+    assert set(readings.values) == {rn.INPUT_POWER, rn.DEVICE_STATUS}
+    assert readings.updated == {"Inverter"}
+    assert set(settings.values) == {rn.TIME_ZONE, rn.STORAGE_MAXIMUM_CHARGING_POWER}
+    assert settings.updated == {"StorageSettings", "DeviceIdentity"}
+
+
+async def test_a_batch_update_still_reads_both(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """The split is opt-in: the aggregate poll is the one read it always was."""
+    result = await sun2000_device.batch_update(_MIXED_POLL)
+
+    assert set(result) == set(_MIXED_POLL)
+    assert [(event.address, event.count) for event in huawei_unit.read_events] == _READING_BLOCKS + _SETTING_BLOCKS
+
+
+async def test_a_settings_poll_of_a_list_without_any_reads_nothing(
+    sun2000_device: SUN2000Device,
+    huawei_unit: MockModbusUnit,
+) -> None:
+    """Asked for no settings, the poll reports nothing rather than failing."""
+    report = await sun2000_device.batch_update_settings([rn.INPUT_POWER])
+
+    assert report.complete
+    assert report.values == {}
+    assert huawei_unit.read_events == []
+
+
+async def test_settings_are_the_registers_something_can_write() -> None:
+    """The split comes off the register map, not off a list kept beside it."""
+    assert rn.STORAGE_MAXIMUM_CHARGING_POWER in SETTING_REGISTERS
+    assert rn.INPUT_POWER not in SETTING_REGISTERS
+    assert all(REGISTER_LOCATIONS[name].definition().writable for name in SETTING_REGISTERS)
 
 
 async def _refuse_block_while_polling_both(

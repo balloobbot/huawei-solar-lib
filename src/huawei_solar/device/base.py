@@ -23,7 +23,7 @@ from huawei_solar.exceptions import (
     ReadException,
     WriteException,
 )
-from huawei_solar.registry import REGISTER_LOCATIONS
+from huawei_solar.registry import REGISTER_LOCATIONS, SETTING_REGISTERS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -181,7 +181,10 @@ class HuaweiSolarDevice(ABC):
         # link, and the inverter answers one conversation at a time.
         self.update_lock = primary_device.update_lock if primary_device else asyncio.Lock()
         self.primary_device = primary_device
-        self._poll: _Poll | None = None
+        # One cached poll per update method, so a caller alternating between a
+        # fast readings poll and a slow settings one does not rebuild both every
+        # time round.
+        self._polls: dict[str, _Poll] = {}
         self._writable: dict[tuple[type[HuaweiComponent], int], HuaweiComponent] = {}
         # Every register this device has actually read, poll or setup probe.
         # A raw dump is built from it, so the identity registers read once at
@@ -246,7 +249,9 @@ class HuaweiSolarDevice(ABC):
         """Read every register in ``register_names`` in as few requests as the device allows.
 
         Registers whose component failed to read are absent from the result.
-        Use :meth:`batch_update_report` to learn which those were, and why.
+        Use :meth:`batch_update_report` to learn which those were, and why, or
+        :meth:`batch_update_readings` / :meth:`batch_update_settings` to poll
+        what the device measures apart from what it was told.
         """
         return (await self.batch_update_report(register_names)).values
 
@@ -256,7 +261,40 @@ class HuaweiSolarDevice(ABC):
         A component that fails to read does not take the rest of the poll with
         it: its registers stay out of the result while every other component
         still refreshes. Only a device that answered nothing at all raises.
+
+        Readings and settings together, in one read that pools whatever the
+        addresses allow — for a caller that does not want to schedule the two
+        apart. :meth:`batch_update_readings` and :meth:`batch_update_settings`
+        split them.
         """
+        return await self._async_poll("all", register_names)
+
+    async def batch_update_readings(self, register_names: list[str]) -> UpdateReport:
+        """Read the registers of ``register_names`` that hold what the device measures.
+
+        Everything the device does not have to be told: power, energy,
+        temperatures, alarms, state. Reports the way
+        :meth:`batch_update_report` does, over that part of the list alone.
+        """
+        return await self._async_poll(
+            "readings",
+            [name for name in register_names if name not in SETTING_REGISTERS],
+        )
+
+    async def batch_update_settings(self, register_names: list[str]) -> UpdateReport:
+        """Read the registers of ``register_names`` that hold what the device was told.
+
+        These change when something writes them, not on their own, so a caller
+        polls them rarely — and reads them back straight after writing one.
+        :data:`~huawei_solar.registry.SETTING_REGISTERS` is which those are.
+        """
+        return await self._async_poll(
+            "settings",
+            [name for name in register_names if name in SETTING_REGISTERS],
+        )
+
+    async def _async_poll(self, slot: str, register_names: list[str]) -> UpdateReport:
+        """Read ``register_names`` through the poll cached under ``slot``."""
         if unknown := [name for name in register_names if name not in REGISTER_LOCATIONS]:
             _LOGGER.warning("Unknown register name passed to batch_update: %s", ", ".join(unknown))
             register_names = [name for name in register_names if name in REGISTER_LOCATIONS]
@@ -264,15 +302,16 @@ class HuaweiSolarDevice(ABC):
         async with self.update_lock:
             wanted = await self._filter_registers(register_names)
 
-            if self._poll is None or not self._poll.matches(wanted):
-                self._poll = _Poll(self.unit, wanted)
+            poll = self._polls.get(slot)
+            if poll is None or not poll.matches(wanted):
+                poll = self._polls[slot] = _Poll(self.unit, wanted)
 
             _LOGGER.debug("Batch update of the following registers: %s", ", ".join(wanted))
 
             values: dict[str, Any] = {}
             updated: set[str] = set()
             failed: dict[str, ModbusError] = {}
-            for name, poll_unit in self._poll.units.items():
+            for name, poll_unit in poll.units.items():
                 try:
                     await poll_unit.component.async_update()
                 except ModbusConnectionError:

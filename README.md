@@ -99,6 +99,35 @@ for component, error in report.failed.items():
     print(f"{component} did not answer: {error}")
 ```
 
+### Reading settings apart from measurements
+
+Some registers hold what the device measures, others hold what it has been told:
+the latter only change when something writes them, so a caller need not pay for
+them every cycle. The library says which are which — `SETTING_REGISTERS` is
+derived from the register map, a register that can be written being one that
+only changes when it is — so a caller does not have to work it out from its own
+metadata.
+
+`batch_update_readings()` and `batch_update_settings()` take the same list of
+register names as `batch_update_report()` and each reads its own part of it,
+reporting the same way:
+
+```py
+await device.batch_update_readings(register_names)  # every cycle
+await device.batch_update_settings(register_names)  # rarely, and after a write
+
+await device.set(rn.STORAGE_WORKING_MODE_SETTINGS, ...)
+await device.batch_update_settings(register_names)  # read back what took effect
+```
+
+`batch_update()` and `batch_update_report()` still read both, in one pooled
+read, for a caller that does not want to schedule them apart.
+
+Registers the device configures but refuses to have written — the grid code,
+the LCOE, the rated power limits — count as measured, and so keep being read
+every cycle. Recognising them would take a list kept apart from the register
+map, which would drift away from it.
+
 ### The raw register map
 
 `async_read_raw()` re-reads every register the device has read — the polled ones
