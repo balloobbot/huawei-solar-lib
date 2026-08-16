@@ -115,6 +115,22 @@ A component that will not answer is left out rather than failing the dump: a
 device that is misbehaving is exactly when the dump is worth having. Only a
 dropped link raises.
 
+## Checking a real device
+
+`script/query.py` detects whatever is answering, reads it once and prints every
+component it has — the quickest way to see whether a device is wired and
+addressed correctly:
+
+```bash
+uv run script/query.py 192.168.1.1
+uv run script/query.py /dev/ttyUSB0 --transport serial --unit 1
+```
+
+Only the strings, storage units and battery packs the inverter reports as fitted
+are read, so the dump follows the installation rather than the register map. It
+prints the read count as well: a small inverter costs around 50 Modbus reads, a
+fully populated one with 24 strings and two batteries around 110.
+
 ## Frequently asked questions
 
 **Q:** the connection is interrupted a few seconds after connecting to the Huawei Device. How do I solve this?
