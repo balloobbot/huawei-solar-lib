@@ -24,6 +24,7 @@ provide them.
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from modbus_connection import (
@@ -35,7 +36,7 @@ from modbus_connection.tmodbus import TmodbusUnit as _TmodbusUnit
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable, Coroutine
 
     from tmodbus.pdu.base import RT, BaseClientPDU
 
@@ -109,21 +110,26 @@ class HuaweiUnit(_TmodbusUnit):
         super().__init__(connection, unit_id)
         self._retry = connection.retry_factory
 
-    async def _retrying[T](self, operation: Callable[[], Awaitable[T]]) -> T:
-        """Run ``operation`` under this connection's retry policy."""
+    async def _retrying[T](self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        """Run ``operation`` under this connection's retry policy.
+
+        tenacity only awaits what it recognises as a coroutine function, so
+        ``operation`` has to be one — a lambda wrapping the call is handed back
+        un-awaited as the result, and never retried.
+        """
         return await self._retry()(operation)
 
     async def read_holding_registers(self, address: int, count: int) -> list[int]:
         """Read holding registers, retrying on timeout."""
-        return await self._retrying(lambda: super(HuaweiUnit, self).read_holding_registers(address, count))
+        return await self._retrying(partial(super().read_holding_registers, address, count))
 
     async def write_register(self, address: int, value: int) -> None:
         """Write a single holding register, retrying on timeout."""
-        await self._retrying(lambda: super(HuaweiUnit, self).write_register(address, value))
+        await self._retrying(partial(super().write_register, address, value))
 
     async def write_registers(self, address: int, values: list[int]) -> None:
         """Write multiple holding registers, retrying on timeout."""
-        await self._retrying(lambda: super(HuaweiUnit, self).write_registers(address, values))
+        await self._retrying(partial(super().write_registers, address, values))
 
     async def execute_pdu(self, pdu: BaseClientPDU[RT]) -> RT:
         """Send a raw application PDU to this unit.
@@ -134,7 +140,7 @@ class HuaweiUnit(_TmodbusUnit):
         here queues behind ordinary reads instead of racing them.
         """
         await self._conn.connect()
-        return await self._retrying(lambda: self._execute_paced(pdu))
+        return await self._retrying(partial(self._execute_paced, pdu))
 
     async def _execute_paced(self, pdu: BaseClientPDU[RT]) -> RT:
         async with self._conn._pacer.paced(self._unit_id):  # noqa: SLF001
