@@ -9,6 +9,9 @@ tests replay them through the new fields.
 
 Regenerating the fixture is not a way to make a failure go away: it is the
 record of the behaviour the migration promised to preserve.
+
+Timestamps decode to naive local time, so the timestamp registers' values are
+expressed in the zone ``conftest`` pins the suite to.
 """
 
 from __future__ import annotations

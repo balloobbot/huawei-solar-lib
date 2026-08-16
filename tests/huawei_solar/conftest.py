@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Iterator
+
 import pytest
 from huawei_solar.register_values import StorageProductModel
 from modbus_connection.mock import MockModbusConnection, MockModbusUnit
@@ -56,6 +60,26 @@ MOCK_HOLDING_REGISTERS: dict[int, list[int]] = {
     42000: [18],
     43006: [60],
 }
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _fixed_local_timezone() -> Iterator[None]:
+    """Run the whole suite in one fixed local time zone.
+
+    ``TimestampField`` decodes to naive local time, so the frozen decode vectors
+    only reproduce under a known zone. Asia/Kolkata never observes DST, which
+    keeps those values out of reach of a tzdata rule change, and is not UTC, so
+    a decode that quietly started reading epochs as UTC still fails the vectors.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    yield
+    if previous is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
 
 
 @pytest.fixture
